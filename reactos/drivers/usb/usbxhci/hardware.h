@@ -294,11 +294,11 @@ typedef struct _OPERATIONAL_REGS
 #define XHCI_IMAN_BASE      0x20
 #define XHCI_IMAN_INTR_ENA  0x02 // Interrupt enable
 
-typedef struct MFINDEX
+typedef struct _MFINDEX
 {
     ULONG MicroframeIndex : 14; // Microframe Index
     ULONG RsvdZ           : 18; // Reserved
-};
+}MFINDEX, *PMFINDEX;
 
 typedef struct _IMAN
 {

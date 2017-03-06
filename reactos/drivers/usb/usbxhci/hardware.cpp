@@ -303,6 +303,7 @@ CUSBHardwareDevice::PnpStart(
                 KeInitializeDpc(&m_IntDpcObject,
                                 XhciDeferredRoutine,
                                 this);
+
                 //
                 // connect ISR
                 //
@@ -368,6 +369,7 @@ CUSBHardwareDevice::PnpStart(
                 DPRINT1("Controller Port Count       : 0x%x\n", m_Capabilities.HcsParams1.MaxPorts);
 
                 //
+                // save XHCI registers addresses for later use
                 //
                 m_CapRegBase = (PULONG)ResourceBase;
                 m_OpRegBase = (PULONG)((ULONG)ResourceBase + m_Capabilities.CapLength);

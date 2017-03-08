@@ -291,6 +291,8 @@ typedef struct _OPERATIONAL_REGS
 #define XHCI_ERDP_BASE_LOW  0x38
 #define XHCI_ERDP_BASE_HIGH 0x38
 
+#define XHCI_ERST_EHB       0x08
+
 #define XHCI_IMAN_BASE      0x20
 #define XHCI_IMAN_INTR_ENA  0x02 // Interrupt enable
 
@@ -349,8 +351,8 @@ typedef struct _RUNTIME_REGS
 //
 // Doorbell Registers
 //
-#define XHCI_DOORBELL             (n) (0x0000 + (4 * (n)))
-#define XHCI_DOORBELL_TARGET_GET  (x) ((x) & 0xFF)
+#define XHCI_DOORBELL(n)              (0x0000 + (4 * (n)))
+#define XHCI_DOORBELL_TARGET_GET(x)   ((x) & 0xFF)
 #define XHCI_DOORBELL_STREAMID_GET(x) (((x) >> 16) & 0xFFFF)
 
 typedef struct _DOORBELL_REGISTER
@@ -381,37 +383,37 @@ typedef struct _DEVICE_CONTEXT_ARRAY
 //
 // 6.2.2 Slot Context
 //
-#define XHCI_GET_SLOT_ROUTE           (x) ((x) & 0xFFFFF)
-#define XHCI_SLOT_ROUTE               (x) ((x) & 0xFFFFF)
-#define XHCI_SLOT_SPEED               (x) (((x) & 0xF) << 20)
-#define XHCI_GET_SLOT_SPEED           (x) (((x) >> 20) & 0xF)
-#define XHCI_SLOT_MTT_BIT             (1 << 25)
-#define XHCI_SLOT_HUB_BIT             (1 << 26)
-#define XHCI_SLOT_NUM_ENTRIES         (x) (((x) & 0x1F) << 27)
-#define XHCI_GET_SLOT_NUM_ENTRIES     (x) (((x) >> 27) & 0x1F)
+#define XHCI_GET_SLOT_ROUTE(x)            ((x) & 0xFFFFF)
+#define XHCI_SLOT_ROUTE(x)                ((x) & 0xFFFFF)
+#define XHCI_SLOT_SPEED(x)                (((x) & 0xF) << 20)
+#define XHCI_GET_SLOT_SPEED(x)            (((x) >> 20) & 0xF)
+#define XHCI_SLOT_MTT_BIT                 (1 << 25)
+#define XHCI_SLOT_HUB_BIT                 (1 << 26)
+#define XHCI_SLOT_NUM_ENTRIES(x)          (((x) & 0x1F) << 27)
+#define XHCI_GET_SLOT_NUM_ENTRIES(x)      (((x) >> 27) & 0x1F)
 
 #define XHCI_GET_SLOT_MAX_EXIT_LATENCY(x) ((x) & 0xFFFF)
-#define XHCI_SLOT_MAX_EXIT_LATENCY    (x) ((x) & 0xFFFF)
-#define XHCI_SLOT_RH_PORT             (x) (((x) & 0xFF) << 16)
-#define XHCI_GET_SLOT_RH_PORT         (x) (((x) >> 16) & 0xFF)
-#define XHCI_SLOT_NUM_PORTS           (x) (((x) & 0xFF) << 24)
-#define XHCI_GET_SLOT_NUM_PORTS       (x) (((x) >> 24) & 0xFF)
+#define XHCI_SLOT_MAX_EXIT_LATENCY(x)     ((x) & 0xFFFF)
+#define XHCI_SLOT_RH_PORT(x)              (((x) & 0xFF) << 16)
+#define XHCI_GET_SLOT_RH_PORT(x)          (((x) >> 16) & 0xFF)
+#define XHCI_SLOT_NUM_PORTS(x)            (((x) & 0xFF) << 24)
+#define XHCI_GET_SLOT_NUM_PORTS(x)        (((x) >> 24) & 0xFF)
 
-#define XHCI_SLOT_TT_HUB_SLOT         (x) ((x) & 0xFF)
-#define XHCI_GET_SLOT_TT_HUB_SLOT     (x) ((x) & 0xFF)
-#define XHCI_SLOT_PORT_NUM            (x) (((x) & 0xFF) << 8)
-#define XHCI_GET_SLOT_PORT_NUM        (x) (((x) >> 8) & 0xFF)
-#define XHCI_SLOT_TT_TIME             (x) (((x) & 0x3) << 16)
-#define XHCI_GET_SLOT_TT_TIME         (x) (((x) >> 16) & 0x3)
-#define XHCI_SLOT_IRQ_TARGET          (x) (((x) & 0x7F) << 22)
-#define XHCI_GET_SLOT_IRQ_TARGET      (x) (((x) >> 22) & 0x7F)
+#define XHCI_SLOT_TT_HUB_SLOT(x)          ((x) & 0xFF)
+#define XHCI_GET_SLOT_TT_HUB_SLOT(x)      ((x) & 0xFF)
+#define XHCI_SLOT_PORT_NUM(x)             (((x) & 0xFF) << 8)
+#define XHCI_GET_SLOT_PORT_NUM(x)         (((x) >> 8) & 0xFF)
+#define XHCI_SLOT_TT_TIME(x)              (((x) & 0x3) << 16)
+#define XHCI_GET_SLOT_TT_TIME(x)          (((x) >> 16) & 0x3)
+#define XHCI_SLOT_IRQ_TARGET(x)           (((x) & 0x7F) << 22)
+#define XHCI_GET_SLOT_IRQ_TARGET(x)       (((x) >> 22) & 0x7F)
 
-#define XHCI_SLOT_DEVICE_ADDRESS      (x) ((x) & 0xFF)
-#define XHCI_GET_SLOT_DEVICE_ADDRESS  (x) ((x) & 0xFF)
-#define XHCI_SLOT_SLOT_STATE          (x) (((x) & 0x1F) << 27)
-#define XHCI_GET_SLOT_SLOT_STATE      (x) (((x) >> 27) & 0x1F)
+#define XHCI_SLOT_DEVICE_ADDRESS(x)       ((x) & 0xFF)
+#define XHCI_GET_SLOT_DEVICE_ADDRESS(x)   ((x) & 0xFF)
+#define XHCI_SLOT_SLOT_STATE(x)           (((x) & 0x1F) << 27)
+#define XHCI_GET_SLOT_SLOT_STATE(x)       (((x) >> 27) & 0x1F)
 
-#define XHCI_GET_HUB_TTT              (x) (((x) >> 5) & 0x3)
+#define XHCI_GET_HUB_TTT(x)               (((x) >> 5) & 0x3)
 
 #define XHCI_DEVICE_SLOT_STATE_DISABLED   0x00
 #define XHCI_DEVICE_SLOT_STATE_ENABLED    0x01
@@ -431,31 +433,31 @@ typedef struct _SLOT_CONTEXT
 //
 // 6.2.3 Endpoint Context
 //
-#define XHCI_ENDPOINT_STATE             (x) ((x) & 0x3)
-#define XHCI_GET_ENDPOINT_STATE_GET     (x) ((x) & 0x3)
-#define XHCI_ENDPOINT_MULT              (x) (((x) & 0x3) << 8)
-#define XHCI_GET_ENDPOINT_MULT          (x) (((x) >> 8) & 0x3)
-#define XHCI_ENDPOINT_MAXPSTREAMS       (x) (((x) & 0x1F) << 10)
-#define XHCI_GET_ENDPOINT_MAXPSTREAMS   (x) (((x) >> 10) & 0x1F)
-#define XHCI_ENDPOINT_LSA_BIT           (1 << 15)
-#define XHCI_ENDPOINT_INTERVAL          (x) (((x) & 0xFF) << 16)
-#define XHCI_GET_ENDPOINT_INTERVAL      (x) (((x) >> 16) & 0xFF)
-                                        
-#define XHCI_ENDPOINT_CERR              (x) (((x) & 0x3) << 1)
-#define XHCI_GET_ENDPOINT_CERR          (x) (((x) >> 1) & 0x3)
-#define XHCI_ENDPOINT_EPTYPE            (x) (((x) & 0x7) << 3)
-#define XHCI_GET_ENDPOINT_EPTYPE        (x) (((x) >> 3) & 0x7)
-#define XHCI_ENDPOINT_HID_BIT           (1 << 7)
-#define XHCI_ENDPOINT_MAXBURST          (x) (((x) & 0xFF) << 8)
-#define XHCI_GET_ENDPOINT_MAXBURST      (x) (((x) >> 8) & 0xFF)
-#define XHCI_ENDPOINT_MAXPACKETSIZE     (x) (((x) & 0xFFFF) << 16)
-#define XHCI_GET_ENDPOINT_MAXPACKETSIZE (x) (((x) >> 16) & 0xFFFF)
+#define XHCI_ENDPOINT_STATE(x)             ((x) & 0x3)
+#define XHCI_GET_ENDPOINT_STATE_GET(x)     ((x) & 0x3)
+#define XHCI_ENDPOINT_MULT(x)              (((x) & 0x3) << 8)
+#define XHCI_GET_ENDPOINT_MULT(x)          (((x) >> 8) & 0x3)
+#define XHCI_ENDPOINT_MAXPSTREAMS(x)       (((x) & 0x1F) << 10)
+#define XHCI_GET_ENDPOINT_MAXPSTREAMS(x)   (((x) >> 10) & 0x1F)
+#define XHCI_ENDPOINT_LSA_BIT              (1 << 15)
+#define XHCI_ENDPOINT_INTERVAL(x)          (((x) & 0xFF) << 16)
+#define XHCI_GET_ENDPOINT_INTERVAL(x)      (((x) >> 16) & 0xFF)
+                                           
+#define XHCI_ENDPOINT_CERR(x)              (((x) & 0x3) << 1)
+#define XHCI_GET_ENDPOINT_CERR(x)          (((x) >> 1) & 0x3)
+#define XHCI_ENDPOINT_EPTYPE(x)            (((x) & 0x7) << 3)
+#define XHCI_GET_ENDPOINT_EPTYPE(x)        (((x) >> 3) & 0x7)
+#define XHCI_ENDPOINT_HID_BIT              (1 << 7)
+#define XHCI_ENDPOINT_MAXBURST(x)          (((x) & 0xFF) << 8)
+#define XHCI_GET_ENDPOINT_MAXBURST(x)      (((x) >> 8) & 0xFF)
+#define XHCI_ENDPOINT_MAXPACKETSIZE(x)     (((x) & 0xFFFF) << 16)
+#define XHCI_GET_ENDPOINT_MAXPACKETSIZE(x) (((x) >> 16) & 0xFFFF)
 
 #define XHCI_ENDPOINT_DCS_BIT           (1 << 0)
 
-#define XHCI_ENDPOINT_AVGTRBLENGTH      (x) ((x) & 0xFFFF)
-#define XHCI_GET_ENDPOINT_AVGTRBLENGTH  (x) ((x) & 0xFFFF)
-#define XHCI_ENDPOINT_MAXESITPAYLOAD    (x) (((x) & 0xFFFF) << 16)
+#define XHCI_ENDPOINT_AVGTRBLENGTH(x)       ((x) & 0xFFFF)
+#define XHCI_GET_ENDPOINT_AVGTRBLENGTH(x)   ((x) & 0xFFFF)
+#define XHCI_ENDPOINT_MAXESITPAYLOAD(x)     (((x) & 0xFFFF) << 16)
 #define XHCI_GET_ENDPOINT_MAXESITPAYLOAD(x) (((x) >> 16) & 0xFFFF)
 
 #define XHCI_ENDPOINT_ISOCHRONOUS_OUT       0x01
@@ -516,20 +518,20 @@ typedef struct _INPUT_DEVICE_CONTEXT
 //
 // Macros for Event TRB 
 //
-#define XHCI_TRB_TD_SIZE            (x) (((x) & 0x1F) << 17)
-#define XHCI_TRB_GET_TD_SIZE        (x) (((x) >> 17) & 0x1F)
+#define XHCI_TRB_TD_SIZE(x)             (((x) & 0x1F) << 17)
+#define XHCI_TRB_GET_TD_SIZE(x)         (((x) >> 17) & 0x1F)
 #define XHCI_TRB_GET_REMAINDER_BYTES(x) ((x) & 0xFFFFFF)
 #define XHCI_TRB_GET_TRANSFER_LENGTH(x) ((x) & 0x1FFFF)
-#define XHCI_TRB_IRQ                (x) (((x) & 0x3FF) << 22)
-#define XHCI_TRB_GET_IRQ            (x) (((x) >> 22) & 0x3FF)
+#define XHCI_TRB_IRQ(x)                 (((x) & 0x3FF) << 22)
+#define XHCI_TRB_GET_IRQ(x)             (((x) >> 22) & 0x3FF)
 
-#define XHCI_TRB_GET_TYPE           (x) (((x) >> 10) & 0x3F)
-#define XHCI_TRB_TYPE               (x) (((x) & 0x3F) << 10)
-#define XHCI_TRB_GET_SLOT           (x) (((x) >> 24) & 0xFF)
-#define XHCI_TRB_SLOT               (x) (((x) & 0xFF) << 24)
-#define XHCI_TRB_GET_ENDPOINT       (x) (((x) & 0x1F) >> 16)
+#define XHCI_TRB_GET_TYPE(x)            (((x) >> 10) & 0x3F)
+#define XHCI_TRB_TYPE(x)                (((x) & 0x3F) << 10)
+#define XHCI_TRB_GET_SLOT(x)            (((x) >> 24) & 0xFF)
+#define XHCI_TRB_SLOT(x)                (((x) & 0xFF) << 24)
+#define XHCI_TRB_GET_ENDPOINT(x)        (((x) & 0x1F) >> 16)
 
-#define XHCI_TRB_COMP_CODE          (x) (((x) >> 24) & 0xFF)
+#define XHCI_TRB_COMP_CODE(x)           (((x) >> 24) & 0xFF)
 
 //
 // TRB Type

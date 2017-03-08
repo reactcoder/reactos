@@ -490,8 +490,213 @@ CUSBHardwareDevice::GetDMA(
 NTSTATUS
 CUSBHardwareDevice::StartController(VOID)
 {
-    UNIMPLEMENTED_DBGBREAK();
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+    ULONG ExtendedCapPointer, CapabilityRegister;
+    LARGE_INTEGER Timeout;
+    ULONG Index = 0;
+    ULONG UsbStatus, Count;
+    PHYSICAL_ADDRESS  PhysicalBaseAddress;
+    PLARGE_INTEGER VirtualBaseAddress;
+    ULONG Register;
+
+    //
+    // get extended capabilities pointer
+    //
+    ExtendedCapPointer = m_Capabilities.HccParams1.xECP << 2;
+
+    do
+    {
+        //
+        // no extended capabilites list?(must rework this)
+        //
+        if (!ExtendedCapPointer)
+            break;
+
+        CapabilityRegister = READ_CAPABILITY_REG_ULONG(ExtendedCapPointer);
+
+        //
+        // looking for USB Legacy Support
+        //
+        if ((CapabilityRegister & XHCI_ECP_MASK) == XHCI_LEGSUP_CAPID)
+        {
+            if (CapabilityRegister & XHCI_LEGSUP_BIOSOWNED)
+            {
+                DPRINT1("The host controller is BIOS owned.\n");
+                WRITE_CAPABILITY_REG_ULONG(ExtendedCapPointer, CapabilityRegister | XHCI_LEGSUP_OSOWNED);
+
+                Timeout.QuadPart = 50;
+                DPRINT1("Waiting %lu miliseconds timeout.\n", Timeout.LowPart);
+
+                Index = 0;
+                do
+                {
+                    CapabilityRegister = READ_CAPABILITY_REG_ULONG(ExtendedCapPointer);
+                    if (!(CapabilityRegister & XHCI_LEGSUP_BIOSOWNED))
+                    {
+                        //
+                        // BIOS released XHCI
+                        //
+                        break;
+                    }
+
+                    //
+                    // convert to 100 ms units
+                    //
+                    Timeout.QuadPart *= -10000;
+
+                    //
+                    // perform the wait
+                    //
+                    KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
+
+                    Index++;
+                } while (Index < 20);
+            }
+
+            if (CapabilityRegister & XHCI_LEGSUP_BIOSOWNED)
+            {
+                DPRINT1("Controller is still BIOS owned.\n");
+            }
+            else if (CapabilityRegister & XHCI_LEGSUP_OSOWNED)
+            {
+                DPRINT1("BIOS released controller onwnership.\n");
+            }
+            break;
+        }
+
+        //
+        // go to Next xHCI Extended Capability Pointer
+        //
+        ExtendedCapPointer += (((CapabilityRegister >> XHCI_NEXT_CAP_SHIFT) & XHCI_ECP_MASK) << 2);
+
+    } while (CapabilityRegister & XHCI_NEXT_CAP_MASK);
+
+    //
+    // check if controller is not halted
+    //
+    UsbStatus = READ_OPERATIONAL_REG_ULONG(XHCI_USBSTS);
+    if (!(UsbStatus & XHCI_STS_HCH))
+    {
+        DPRINT1("Stopping Controller. \n");
+        StopController();
+    }
+
+    ResetController();
+
+    //
+    // TODO: get ports speed from extended capability
+    //
+
+    //
+    // activate device slots
+    //
+    ASSERT(m_Capabilities.HcsParams1.MaxSlots);
+    WRITE_OPERATIONAL_REG_ULONG(XHCI_CONFIG, m_Capabilities.HcsParams1.MaxSlots);
+
+    //
+    // allocate memory for device context base address array
+    //
+    Status = m_MemoryManager->Allocate((m_Capabilities.HcsParams1.MaxSlots + 1) * sizeof(PHYSICAL_ADDRESS), (PVOID*)&m_DeviceContextArray, &m_PhysicalDeviceContextArray);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Failed to allocate memory for DCBA.\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    //
+    // allocate memory for scratchpad buffers(for xHCI internal use)
+    //
+    Count = (m_Capabilities.HcsParams2.MaxScratchPadBufsHi << 5) | m_Capabilities.HcsParams2.MaxScratchPadBufsLo;
+    if (Count)
+    {
+        //
+        // allocate memory for scratchpad buffers array
+        //
+        Status = m_MemoryManager->Allocate(sizeof(PHYSICAL_ADDRESS) * Count, (PVOID*)&VirtualBaseAddress, &PhysicalBaseAddress);
+        if (!NT_SUCCESS(Status))
+        {
+            //
+            // TODO: free prev allocated resources
+            //
+            DPRINT1("Failed to allocate memory for scrachpad array.\n");
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        //
+        // initialize scratchpad buffers array
+        //
+        for (Index = 0; Index < Count; Index++)
+        {
+            Status = m_MemoryManager->Allocate(XHCI_PAGE_SIZE, (PVOID*)&VirtualBase, &PhysicalAddress);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("Failed to allocate memory for scratchpad buffers.\n");
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            //
+            // setup element
+            //
+            VirtualBaseAddress[Index].QuadPart = PhysicalAddress.QuadPart;
+        }
+
+        //
+        // first element in device context array must be a pointer to scratchpad buffers array
+        //
+        m_DeviceContextArray[0].QuadPart = PhysicalBaseAddress.QuadPart;
+    }
+
+    //
+    // set Device Context Base Address Array Pointer
+    //
+    WRITE_OPERATIONAL_REG_ULONG(XHCI_DCBAAP_HIGH, m_PhysicalDeviceContextArray.LowPart);
+    WRITE_OPERATIONAL_REG_ULONG(XHCI_DCBAAP_LOW, m_PhysicalDeviceContextArray.HighPart);
+
+    // after reset all notifications are disabled(5.4.4)
+
+    //
+    // initialize UsbQueue
+    //
+    Status = m_UsbQueue->Initialize(PUSBHARDWAREDEVICE(this), m_Adapter, m_MemoryManager, &m_Lock);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Failed to initialize UsbQueue\n");
+        return Status;
+    }
+
+    DPRINT1("Enable interrupts and start the controller.\n");
+    Register = READ_RUNTIME_REG_ULONG(XHCI_IMAN_BASE);
+    WRITE_RUNTIME_REG_ULONG(XHCI_IMAN_BASE, Register | XHCI_IMAN_INTR_ENA);
+
+    //
+    // start controller
+    //
+    Register = READ_OPERATIONAL_REG_ULONG(XHCI_USBCMD);
+    WRITE_OPERATIONAL_REG_ULONG(XHCI_USBCMD, Register | XHCI_CMD_RUN | XHCI_CMD_EIE | XHCI_CMD_HSEE);
+
+    //
+    // wait for controller to start
+    //
+    Index = 0;
+    do
+    {
+        KeStallExecutionProcessor(10);
+
+        UsbStatus = READ_OPERATIONAL_REG_ULONG(XHCI_USBSTS);
+
+        Index++;
+    } while (Index < 100 && (UsbStatus & XHCI_STS_HCH));
+
+    if (UsbStatus & XHCI_STS_HCH)
+    {
+        DPRINT1("Controller is not responding to start request\n");
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    //
+    // great success
+    //
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -663,17 +868,93 @@ CUSBHardwareDevice::GetUSBType(VOID)
     return "USBXHCI";
 }
 
+//
+// IMP_IUSBXHCIHARDWARE
+//
+VOID
+STDMETHODCALLTYPE
+CUSBHardwareDevice::SetRuntimeRegister(
+    IN ULONG Offset,
+    IN ULONG Value)
+{
+    WRITE_RUNTIME_REG_ULONG(Offset, Value);
+}
+
+ULONG
+STDMETHODCALLTYPE
+CUSBHardwareDevice::GetRuntimeRegister(IN ULONG Offset)
+{
+    return READ_RUNTIME_REG_ULONG(Offset);
+}
+
+VOID
+STDMETHODCALLTYPE
+CUSBHardwareDevice::SetOperationalRegister(
+    IN ULONG Offset,
+    IN ULONG Value)
+{
+    WRITE_OPERATIONAL_REG_ULONG(Offset, Value);
+}
+
 BOOLEAN
 NTAPI
 InterruptServiceRoutine(
     IN PKINTERRUPT Interrupt,
     IN PVOID ServiceContext)
 {
-    UNREFERENCED_PARAMETER(Interrupt);
-    UNREFERENCED_PARAMETER(ServiceContext);
+    ULONG UsbStatus, InterruptStatus;
+    CUSBHardwareDevice *This;
 
-    UNIMPLEMENTED_DBGBREAK();
-    return FALSE;
+    DbgBreakPoint();
+    
+    This = (CUSBHardwareDevice*)ServiceContext;
+    UsbStatus = This->READ_OPERATIONAL_REG_ULONG(XHCI_USBSTS);
+
+    //
+    // check if the interrupt belong to XHCI
+    //
+    if (!(UsbStatus & XHCI_STS_EINT))
+    {
+        DPRINT1("Interrupt don't belong to XHCI.\n");
+        return FALSE;
+    }
+
+    //
+    // clear EINT before Interrupt Pending flag
+    //
+    This->WRITE_OPERATIONAL_REG_ULONG(XHCI_USBSTS, UsbStatus);
+
+    if (UsbStatus & XHCI_STS_HCH)
+    {
+        DPRINT("Host Controller Halted.\n");
+        return TRUE;
+    }
+
+    if (UsbStatus & XHCI_STS_HSE)
+    {
+        DPRINT("Host System Error.\n");
+        return TRUE;
+    }
+
+    if (UsbStatus & XHCI_STS_HCE)
+    {
+        DPRINT("Host controller Error.\n");
+        return TRUE;
+    }
+
+    //
+    // clear interrupt pending bit(RW1C)
+    //
+    InterruptStatus = This->READ_RUNTIME_REG_ULONG(XHCI_IMAN_BASE);
+    This->WRITE_RUNTIME_REG_ULONG(XHCI_IMAN_BASE, InterruptStatus);
+
+    DPRINT("Event interrupt.\n");
+    KeInsertQueueDpc(&This->m_IntDpcObject, This, (PVOID)UsbStatus);
+
+    //
+    // great success
+    //
+    return TRUE;
 }
 
 VOID
@@ -684,13 +965,68 @@ XhciDeferredRoutine(
     IN PVOID SystemArgument1,
     IN PVOID SystemArgument2)
 {
-    UNREFERENCED_PARAMETER(Dpc);
-    UNREFERENCED_PARAMETER(DeferredContext);
-    UNREFERENCED_PARAMETER(SystemArgument1);
-    UNREFERENCED_PARAMETER(SystemArgument2);
-   
-    UNIMPLEMENTED_DBGBREAK();
-    return;
+    ULONG Type;
+    ULONG QueueSCEWorkItem = FALSE;
+    PTRB TransferRequestBlock = NULL;
+    CUSBHardwareDevice *This;
+
+    This = (CUSBHardwareDevice*)SystemArgument1;
+
+    //
+    // using while loop in a DPC is not that bad as it looks
+    //
+    while (TRUE)
+    {
+        //
+        // get first event from ringbuffer
+        //
+        TransferRequestBlock = This->m_UsbQueue->GetEventRingDequeuePointer();
+        if (!TransferRequestBlock)
+        {
+            //
+            // no more TRBs
+            //
+            break;
+        }
+
+        //
+        // get TRB type
+        //
+        Type = XHCI_TRB_GET_TYPE(TransferRequestBlock->Field[3]);
+        if (Type == XHCI_TRB_TYPE_COMMAND_COMPLETION)
+        {
+            DPRINT("Command completion.\n");
+            This->m_UsbQueue->CompleteCommandRequest(TransferRequestBlock);
+        }
+        else if (Type == XHCI_TRB_TYPE_TRANSFER)
+        {
+            DPRINT("Complete transfer.\n");
+            //
+            //FIXME: transfer request vs control request
+            //
+            This->m_UsbQueue->CompleteTransferRequest(TransferRequestBlock);
+        }
+        else if (Type == XHCI_TRB_TYPE_PORT_STATUS_CHANGE)
+        {
+            DPRINT("Port Status Change Event\n");
+
+            //
+            // queue SCE
+            //
+            QueueSCEWorkItem = TRUE;
+        } 
+    }
+
+    //
+    // queue work item
+    //
+    if (QueueSCEWorkItem && This->m_SCECallBack != NULL)
+    {
+        if (InterlockedCompareExchange(&This->m_StatusChangeWorkItemStatus, 1, 0) == 0)
+        {
+            ExQueueWorkItem(&This->m_StatusChangeWorkItem, DelayedWorkQueue);
+        }
+    }
 }
 
 VOID

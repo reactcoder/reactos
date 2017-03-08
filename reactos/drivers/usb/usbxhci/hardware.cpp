@@ -760,7 +760,8 @@ CUSBHardwareDevice::ResetController(void)
         KeStallExecutionProcessor(10);
 
         UsbStatus = READ_OPERATIONAL_REG_ULONG(XHCI_USBSTS);
-
+        
+        Index++;
     } while (Index < 100 && !(UsbStatus & XHCI_STS_HCH));
 
     if (!(UsbStatus & XHCI_STS_HCH))
@@ -772,6 +773,7 @@ CUSBHardwareDevice::ResetController(void)
     //
     // wait till controller not ready is cleared
     //
+    Index = 0;
     do
     {
         //
@@ -780,7 +782,8 @@ CUSBHardwareDevice::ResetController(void)
         KeStallExecutionProcessor(10);
 
         UsbStatus = READ_OPERATIONAL_REG_ULONG(XHCI_USBSTS);
-
+        
+        Index++;
     } while (Index < 100 && (UsbStatus & XHCI_STS_CNR));
 
     if (UsbStatus & XHCI_STS_CNR)

@@ -649,8 +649,8 @@ CUSBHardwareDevice::StartController(VOID)
     //
     // set Device Context Base Address Array Pointer
     //
-    WRITE_OPERATIONAL_REG_ULONG(XHCI_DCBAAP_HIGH, m_PhysicalDeviceContextArray.LowPart);
-    WRITE_OPERATIONAL_REG_ULONG(XHCI_DCBAAP_LOW, m_PhysicalDeviceContextArray.HighPart);
+    WRITE_OPERATIONAL_REG_ULONG(XHCI_DCBAAP_LOW, m_PhysicalDeviceContextArray.LowPart);
+    WRITE_OPERATIONAL_REG_ULONG(XHCI_DCBAAP_HIGH, m_PhysicalDeviceContextArray.HighPart);
 
     // after reset all notifications are disabled(5.4.4)
 

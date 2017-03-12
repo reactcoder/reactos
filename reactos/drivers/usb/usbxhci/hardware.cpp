@@ -110,6 +110,7 @@ protected:
     PHYSICAL_ADDRESS m_PhysicalDeviceContextArray;                                     // device context array physical address
     PVOID VirtualBase;                                                                 // virtual base for memory manager
     PHYSICAL_ADDRESS PhysicalAddress;                                                  // physical base for memory manager
+    BOOLEAN m_PortResetInProgress[0xF];                                                // stores reset in progress
 };
 
 //
@@ -804,12 +805,44 @@ CUSBHardwareDevice::ResetController(void)
 NTSTATUS
 STDMETHODCALLTYPE
 CUSBHardwareDevice::ResetPort(
-    IN ULONG PortIndex)
+    IN ULONG PortId)
 {
-    UNREFERENCED_PARAMETER(PortIndex);
+    ULONG Status;
+    LARGE_INTEGER Timeout;
 
-    UNIMPLEMENTED_DBGBREAK();
-    return STATUS_NOT_IMPLEMENTED;
+    DPRINT("CUSBHardwareDevice::ResetPort\n");
+
+    if (PortId > m_Capabilities.HcsParams1.MaxPorts)
+        return STATUS_UNSUCCESSFUL;
+
+    //
+    // get port status
+    //
+    Status = READ_OPERATIONAL_REG_ULONG(XHCI_PORTSC(PortId));
+
+    //
+    // reset the port
+    //
+    Status |= XHCI_PORT_RESET;
+    WRITE_OPERATIONAL_REG_ULONG(XHCI_PORTSC(PortId), Status);
+
+    Timeout.QuadPart = 50;
+    DPRINT1("Waiting %lu miliseconds for port reset\n", Timeout.LowPart);
+
+    //
+    // convert to 100 ns units
+    //
+    Timeout.QuadPart *= -10000;
+
+    //
+    // put the current thread in a wait state
+    //
+    KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
+
+    //
+    // great success
+    //
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -819,12 +852,104 @@ CUSBHardwareDevice::GetPortStatus(
     OUT USHORT *PortStatus, 
     OUT USHORT *PortChange)
 {
-    UNREFERENCED_PARAMETER(PortId);
-    UNREFERENCED_PARAMETER(PortStatus);
-    UNREFERENCED_PARAMETER(PortChange);
+    ULONG Value, Speed;
+    USHORT Status = 0, Change = 0;
 
-    UNIMPLEMENTED_DBGBREAK();
-    return STATUS_NOT_IMPLEMENTED;
+    DPRINT("CUSBHardwareDevice::GetPortStatus\n");
+
+    //
+    // sanity check
+    //
+    if (PortId > m_Capabilities.HcsParams1.MaxPorts)
+        return STATUS_UNSUCCESSFUL;
+
+    //
+    // get port status
+    //
+    Value = READ_OPERATIONAL_REG_ULONG(XHCI_PORTSC(PortId));
+
+    //
+    // check if host controller have port power control
+    //
+    if (m_Capabilities.HccParams1.PPC)
+    {
+        //
+        // get port power control state
+        //
+        if (Value & XHCI_PORT_POWER)
+        {
+            Status |= USB_PORT_STATUS_POWER;
+        }
+    }
+    else // no port power control
+    {
+        Status |= USB_PORT_STATUS_POWER;
+    }
+
+    if (Value & XHCI_PORT_CONNECT_STATUS)
+    {
+        Status |= USB_PORT_STATUS_CONNECT;
+
+        //
+        // get port speed
+        //
+        Speed = XHCI_PORT_GET_SPEED(Value);
+        if (Speed == XHCI_PORT_LOW_SPEED)
+        {
+            Status |= USB_PORT_STATUS_LOW_SPEED;
+        }
+        else if (Speed == XHCI_PORT_HIGH_SPEED)
+        {
+            Status |= USB_PORT_STATUS_HIGH_SPEED;
+        }
+        else if (Speed == XHCI_PORT_SUPER_SPEED)
+        {
+            //Status |= USB_PORT_STATUS_SUPER_SPEED;
+        }
+    }
+
+    //
+    // get Enabled Status
+    //
+    if (Value & XHCI_PORT_ENABLED)
+        Status |= USB_PORT_STATUS_ENABLE;
+
+    //
+    // is port overcurrent active?
+    //
+    if (Value & XHCI_PORT_OVER_CURRENT_ACTIVE)
+        Status |= USB_PORT_STATUS_OVER_CURRENT;
+
+    //
+    // in a reset state?
+    //
+    if ((Value & XHCI_PORT_RESET) || m_PortResetInProgress[PortId])
+    {
+        Status |= USB_PORT_STATUS_RESET;
+        Change |= USB_PORT_STATUS_RESET;
+    }
+
+    //
+    // connect or disconnect?
+    //
+    if (Value & XHCI_PORT_CONNECT_STATUS_CHANGE)
+    {
+        Change |= USB_PORT_STATUS_CONNECT;
+    }
+
+    //
+    // port transition
+    //
+    if ((Value & XHCI_PORT_ENABLED_CHANGE))
+        Change |= USB_PORT_STATUS_ENABLE;
+
+    *PortStatus = Status;
+    *PortChange = Change;
+
+    //
+    // great success
+    //
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -833,11 +958,80 @@ CUSBHardwareDevice::ClearPortStatus(
     IN ULONG PortId,
     IN ULONG Status)
 {
-    UNREFERENCED_PARAMETER(PortId);
-    UNREFERENCED_PARAMETER(Status);
+    ULONG PortStatus;
+    LARGE_INTEGER Timeout;
 
-    UNIMPLEMENTED_DBGBREAK();
-    return STATUS_NOT_IMPLEMENTED;
+    DPRINT("CUSBHardwareDevice::ClearPortStatus\n");
+
+    if (PortId > m_Capabilities.HcsParams1.MaxPorts)
+        return STATUS_UNSUCCESSFUL;
+    
+    //
+    // Get port status
+    //
+    PortStatus = READ_OPERATIONAL_REG_ULONG(XHCI_PORTSC(PortId));
+
+    if (Status == C_PORT_RESET)
+    {
+        //
+        // Section 5.4.8, Table 39, bit 4: PR remains set until reset signaling is completed by the root hub.
+        //
+        m_PortResetInProgress[PortId] = FALSE;
+
+        //
+        // when port reset sequence is initiated, XHCI generate a port reset event and set PR bit to 0
+        // section: 4.19.1.1 USB2 Root Hub Port Port State Machine
+        //
+        do
+        {
+            //
+            // get port status
+            //
+            PortStatus = READ_OPERATIONAL_REG_ULONG(XHCI_PORTSC(PortId));
+
+            //
+            // wait till PR bit is cleared
+            //
+            KeStallExecutionProcessor(20);
+        } while (PortStatus & XHCI_PORT_RESET);
+    }
+    else if (Status == C_PORT_CONNECTION)
+    {
+        //
+        // clear CSC in order to recognize feature CSCs
+        //
+        WRITE_OPERATIONAL_REG_ULONG(XHCI_PORTSC(PortId), PortStatus | XHCI_PORT_CONNECT_STATUS_CHANGE);
+
+        if (PortStatus & XHCI_PORT_CONNECT_STATUS)
+        {
+            //
+            // delay is 50 ms
+            //
+            Timeout.QuadPart = 50;
+
+            //
+            // convert to 100ns units
+            //
+            Timeout.QuadPart *= -10000;
+
+            //
+            // put the current thread in a wait state
+            //
+            KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
+        }
+    }
+    else if (Status == C_PORT_ENABLE)
+    {
+        //
+        // clear Port Enabled Change bit
+        //
+        WRITE_OPERATIONAL_REG_ULONG(XHCI_PORTSC(PortId), PortStatus | XHCI_PORT_ENABLED_CHANGE);
+    }
+
+    //
+    // great success
+    //
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -846,11 +1040,84 @@ CUSBHardwareDevice::SetPortFeature(
     IN ULONG PortId,
     IN ULONG Feature)
 {
-    UNREFERENCED_PARAMETER(PortId);
-    UNREFERENCED_PARAMETER(Feature);
-    
-    UNIMPLEMENTED_DBGBREAK();
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG PortStatus;
+    LARGE_INTEGER Timeout;
+
+    DPRINT("CUSBHardwareDevice::SetPortFeature\n.");
+
+    if (PortId > m_Capabilities.HcsParams1.MaxPorts)
+        return STATUS_INVALID_PARAMETER;
+
+    //
+    // get port status
+    //
+    PortStatus = READ_OPERATIONAL_REG_ULONG(XHCI_PORTSC(PortId));
+
+    if (Feature == PORT_ENABLE)
+    {
+        DPRINT("PORT_ENABLE called\n");
+        ASSERT(PortStatus & XHCI_PORT_ENABLED);
+
+        //
+        // TODO: initialize slot
+        //
+    }
+    else if (Feature == PORT_SUSPEND)
+    {
+        DPRINT("PORT_SUSPEND called.\n");
+        //
+        // TODO: check device slot state
+        //
+    }
+    else if (Feature == PORT_RESET)
+    {
+        DPRINT("PORT_RESET called.\n");
+        ResetPort(PortId);
+
+        //
+        // Section 5.4.8, Table 39, bit 4: PR remains set until reset signaling is completed by the root hub.
+        //
+        m_PortResetInProgress[PortId] = TRUE;
+   
+        //
+        // callback registered?
+        //
+        if (m_SCECallBack != NULL)
+        {
+            //
+            // call it
+            //
+            m_SCECallBack(m_SCEContext);
+        }
+    }
+    else if (Feature == PORT_POWER)
+    {
+        //
+        // power on
+        //
+        WRITE_OPERATIONAL_REG_ULONG(XHCI_PORTSC(PortId), PortStatus | XHCI_PORT_POWER);
+        
+        //
+        // delay is 20 ms
+        //
+        Timeout.QuadPart = 20;
+        
+        //
+        // convert to 100ns units
+        //
+        Timeout.QuadPart *= -10000;
+        
+        //
+        // put the current thread in a wait state
+        //
+        KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
+    }
+
+    //
+    // great success
+    //
+    return Status;
 }
 
 VOID
@@ -908,8 +1175,6 @@ InterruptServiceRoutine(
     ULONG UsbStatus, InterruptStatus;
     CUSBHardwareDevice *This;
 
-    DbgBreakPoint();
-    
     This = (CUSBHardwareDevice*)ServiceContext;
     UsbStatus = This->READ_OPERATIONAL_REG_ULONG(XHCI_USBSTS);
 

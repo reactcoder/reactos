@@ -44,14 +44,17 @@ protected:
     PKSPIN_LOCK m_Lock;
     PXHCIHARDWAREDEVICE m_Hardware;
     PDMAMEMORYMANAGER m_MemoryManager;
-    LIST_ENTRY m_CommandRingList;
     PHYSICAL_ADDRESS m_EventRingPhysicalAddress;
     PVOID m_EventRingVirtualAddress;
     ULONG m_EventRingCycleState;
-    //PTRB m_EventRingDequeueAddress;
+    PTRB m_EventRingDequeueAddress;
     PHYSICAL_ADDRESS m_CommandRingPhysicalAddress;
     PVOID m_CommandRingVirtualAddress;
-    PTRB m_EventRingDequeueAddress;
+    PTRB m_CommandRingEnqueueAddress;
+    ULONG m_CommandRingCycleState;
+    LIST_ENTRY m_CommandRingList;
+
+    NTSTATUS LinkCommandDescriptor(PCOMMAND_DESCRIPTOR CommandDescriptor);
 };
 
 //
@@ -175,6 +178,7 @@ CUSBQueue::InitializeRingbuffers(
     // set Event Ring Dequeue Pointer Register
     //
     Hardware->SetRuntimeRegister(XHCI_ERDP_BASE_LOW, m_EventRingPhysicalAddress.LowPart);
+    Hardware->SetRuntimeRegister(XHCI_ERDP_BASE_HIGH, m_EventRingPhysicalAddress.HighPart);
 
     //
     // allocate memory for command ringbuffer
@@ -193,10 +197,17 @@ CUSBQueue::InitializeRingbuffers(
     }
 
     //
+    // set enqueue pointer and cycle state
+    //
+    m_CommandRingEnqueueAddress = (PTRB)m_CommandRingVirtualAddress;
+    m_CommandRingCycleState = 1;
+
+    //
     // last trb is a link trb (in order to construct a ringbuffer)
     //
     LastTransferRequestBlock = (PTRB)((ULONG_PTR)m_CommandRingVirtualAddress + (XHCI_MAX_COMMANDS * sizeof(TRB)));
     LastTransferRequestBlock->Field[0] = m_CommandRingPhysicalAddress.LowPart;
+    LastTransferRequestBlock->Field[1] = m_CommandRingPhysicalAddress.HighPart;
 
     //
     // set Command Ring Control Register. also set up Ring Cycle State 
@@ -213,12 +224,135 @@ CUSBQueue::InitializeRingbuffers(
 NTSTATUS
 STDMETHODCALLTYPE
 CUSBQueue::AddUSBRequest(
-    IN IUSBRequest *Request)
+    IN IUSBRequest *Req)
 {
-    UNREFERENCED_PARAMETER(Request);
+    NTSTATUS            Status;
+    PXHCIREQUEST        Request;
+    KIRQL               OldIrql;
+    ULONG               Type, Target;
+    PCOMMAND_DESCRIPTOR CommandDescriptorHead = NULL;
+    PDEVICE_INFORMATION DeviceInformation;
 
-    UNIMPLEMENTED_DBGBREAK();
-    return STATUS_NOT_IMPLEMENTED;
+    DPRINT("AddUSBRequest called. \n");
+
+    //
+    // get a pointer to all interfaces
+    //
+    Request = PXHCIREQUEST(Req);
+
+    //
+    // get request type
+    //
+    Type = Request->GetTransferType();
+
+    //
+    // check if supported
+    //
+    switch (Type)
+    {
+        case USB_ENDPOINT_TYPE_ISOCHRONOUS:
+            Status = STATUS_NOT_SUPPORTED;
+            break;
+        case USB_ENDPOINT_TYPE_INTERRUPT:
+        case USB_ENDPOINT_TYPE_BULK:
+            Status = STATUS_NOT_SUPPORTED;
+            break;
+        case USB_ENDPOINT_TYPE_CONTROL:
+            Target = Request->GetRequestTarget();
+            Status = STATUS_SUCCESS;
+            break;
+        default:
+            /* BUG */
+            PC_ASSERT(FALSE);
+            Status = STATUS_NOT_SUPPORTED;
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        //
+        // invalid type
+        //
+        return Status;
+    }
+
+    //
+    // obtain device information from device address
+    //
+    Status = m_Hardware->GetDeviceInformationByAddress(Request->GetRequestDeviceAddress(), &DeviceInformation);
+    if (!NT_SUCCESS(Status))
+    {
+        //
+        // failed
+        //
+        return Status;
+    }
+
+    //
+    // set device information
+    //
+    Request->SetRequestDeviceInformation(DeviceInformation);
+
+    if (Type == USB_ENDPOINT_TYPE_CONTROL && Target == USB_TARGET_XHCI)
+    {
+        //
+        // get command descriptor
+        //
+        Status = Request->GetCommandDescriptor(&CommandDescriptorHead);
+    }
+    else // USB_TARGET_DEVICE
+    {
+        //
+        // TODO: normal transfer or control transfer
+        //
+        // Status = Request->GetTransferDescriptor(&TransferDescriptorHead);
+        ASSERT(FALSE);
+    }
+
+    if (!NT_SUCCESS(Status))
+    {
+        //
+        // failed to get descriptor
+        //
+        return Status;
+    }
+
+    //
+    // add aextra referece which is released when the request is completed
+    //
+    Request->AddRef();
+
+    //
+    // acquire the lock
+    //
+    KeAcquireSpinLock(m_Lock, &OldIrql);
+
+    //
+    // Control transfer?
+    //
+    if (Type == USB_ENDPOINT_TYPE_CONTROL)
+    {
+        if (Target == USB_TARGET_XHCI)
+        {
+            LinkCommandDescriptor(CommandDescriptorHead);
+        }
+        else // USB_TARGET_ENDPOINT
+        {
+            // Status = LinkControlTransferDescriptor(TransferDescriptorHead);
+        }
+    }
+    else // Data transfer
+    {
+        // Status = LinkDataTransferDescriptor(TransferDescriptorHead);
+    }
+
+    //
+    // release the lock
+    //
+    KeReleaseSpinLock(m_Lock, OldIrql);
+
+    //
+    // great success
+    //
+    return Status;
 }
 
 NTSTATUS
@@ -226,12 +360,182 @@ STDMETHODCALLTYPE
 CUSBQueue::CreateUSBRequest(
     IN IUSBRequest **OutRequest)
 {
-    UNREFERENCED_PARAMETER(OutRequest);
+    PUSBREQUEST UsbRequest;
+    NTSTATUS Status;
 
-    UNIMPLEMENTED_DBGBREAK();
-    return STATUS_NOT_IMPLEMENTED;
+    *OutRequest = NULL;
+    Status = InternalCreateUSBRequest(&UsbRequest);
+
+    if (NT_SUCCESS(Status))
+    {
+        *OutRequest = UsbRequest;
+    }
+
+    return STATUS_SUCCESS;
 }
 
+NTSTATUS
+STDMETHODCALLTYPE
+CUSBQueue::SubmitInternalCommand(
+    IN PDMAMEMORYMANAGER MemoryManager,
+    IN PCOMMAND_INFORMATION CommandInformation,
+    IN PTRB OutTransferRequestBlock)
+{
+    NTSTATUS Status;
+    PUSBREQUEST UsbRequest;
+    PXHCIREQUEST Request;
+
+    //
+    // create request
+    //
+    Status = CreateUSBRequest(&UsbRequest);
+    if (!NT_SUCCESS(Status))
+    {
+        //
+        // failed to build request
+        //
+        DPRINT1("CreateUSBRequest failed with status %x\n", Status);
+        return Status;
+    }
+
+    //
+    // get internal request
+    //
+    Request = PXHCIREQUEST(UsbRequest);
+
+    //
+    // initialize request with command
+    //
+    Status = Request->InitializeWithCommand(MemoryManager, CommandInformation, OutTransferRequestBlock);
+    if (!NT_SUCCESS(Status))
+    {
+        //
+        // failed to initialize request
+        //
+        DPRINT1("InitializeWithCommand failed with status %x\n", Status);
+        Request->Release();
+        return Status;
+    }
+
+    //
+    // add request to the queue
+    //
+    Status = AddUSBRequest(UsbRequest);
+    if (!NT_SUCCESS(Status))
+    {
+        //
+        // failed to add request
+        //
+        DPRINT1("Failed add request to queue with status %x\n", Status);
+        Request->Release();
+        return Status;
+    }
+
+    //
+    // wait for request to complete
+    //
+    Request->GetResultStatus(&Status, NULL);
+
+    //
+    // free request
+    //
+    Request->Release();
+
+    //
+    // great success
+    //
+    return Status;
+}
+
+NTSTATUS
+CUSBQueue::LinkCommandDescriptor(IN PCOMMAND_DESCRIPTOR CommandDescriptor)
+{
+    ULONG LinkTransferRequestBlock;
+    KIRQL OldIrql;
+
+    //
+    // acquire the lock
+    //
+    KeAcquireSpinLock(m_Lock, &OldIrql);
+
+    //
+    // put request in the queue
+    //
+    RtlCopyMemory(m_CommandRingEnqueueAddress, CommandDescriptor->VirtualTrbAddress, sizeof(TRB));
+    
+    if (m_CommandRingCycleState)
+    {
+        m_CommandRingEnqueueAddress->Field[3] |= XHCI_TRB_CYCLE_BIT;
+    }
+    else
+    {
+        m_CommandRingEnqueueAddress->Field[3] &= ~XHCI_TRB_CYCLE_BIT;
+    }
+
+    //
+    // clear toggle cycle bit
+    //
+    m_CommandRingEnqueueAddress->Field[3] &= ~XHCI_TRB_TC_BIT;
+
+    //
+    // go to next trb
+    //
+    m_CommandRingEnqueueAddress++;
+
+    //
+    // check if this is penultimate trb from ring
+    //
+    if (m_CommandRingEnqueueAddress == ((PTRB)((ULONG_PTR)m_CommandRingVirtualAddress + (sizeof(TRB) * (XHCI_MAX_COMMANDS - 1)))))
+    {
+        //
+        // this is a link trb, set toggle cycle because we start from beginning
+        //
+        LinkTransferRequestBlock = XHCI_TRB_TYPE(XHCI_TRB_TYPE_LINK) | XHCI_TRB_TC_BIT;
+
+        //
+        // set the same value for cycle bit in link trb as previous
+        //
+        if (m_CommandRingCycleState)
+        {
+            LinkTransferRequestBlock |= XHCI_TRB_CYCLE_BIT;
+        }
+
+        //
+        // set link trb info
+        //
+        m_CommandRingEnqueueAddress->Field[3] = LinkTransferRequestBlock;
+
+        //
+        // toggle cycle bit
+        //
+        m_CommandRingCycleState ^= 1;
+
+        //
+        // next time we start from beginning
+        //
+        m_CommandRingEnqueueAddress = (PTRB)m_CommandRingVirtualAddress;
+    }
+
+    //
+    // insert it in the list
+    //
+    InsertTailList(&m_CommandRingList, &CommandDescriptor->DescriptorListEntry);
+
+    //
+    // release the lock
+    //
+    KeReleaseSpinLock(m_Lock, OldIrql);
+
+    //
+    // ring the doorbell for XHCI
+    //
+    m_Hardware->RingDoorbellRegister(0, 0, 0);
+
+    //
+    // success
+    //
+    return STATUS_SUCCESS;
+}
 NTSTATUS
 STDMETHODCALLTYPE
 CUSBQueue::AbortDevicePipe(
@@ -251,10 +555,85 @@ CUSBQueue::AbortDevicePipe(
 
 VOID
 STDMETHODCALLTYPE
-CUSBQueue::CompleteCommandRequest(PTRB TransferRequestBlock)
+CUSBQueue::CompleteCommandRequest(IN PTRB TransferRequestBlock)
 {
+    PLIST_ENTRY Entry;
+    USBD_STATUS UrbStatus = USBD_STATUS_DATA_BUFFER_ERROR;
+    PCOMMAND_DESCRIPTOR CommandDescriptor;
+    PXHCIREQUEST Request;
+    KIRQL OldIrql;
+
     DPRINT("CompleteCommandRequest called!\n");
-    UNIMPLEMENTED_DBGBREAK();
+
+    //
+    // acquire the lock
+    //
+    KeAcquireSpinLock(m_Lock, &OldIrql);
+
+    if (!IsListEmpty(&m_CommandRingList))
+    {
+        //
+        // get first command
+        //
+        Entry = RemoveHeadList(&m_CommandRingList);
+
+        //
+        // get pointer to command descriptor
+        //
+        CommandDescriptor = CONTAINING_RECORD(Entry, COMMAND_DESCRIPTOR, DescriptorListEntry);
+
+        //
+        // internal request?
+        //
+        if (CommandDescriptor->CompletedTrb)
+        {
+            //
+            // copy the result
+            //
+            RtlCopyMemory(CommandDescriptor->CompletedTrb, TransferRequestBlock, sizeof(TRB));
+        }
+
+        //
+        // Check if request was successful
+        //
+        if (XHCI_TRB_COMP_CODE(TransferRequestBlock->Field[2]) == XHCI_TRB_COMPLETION_SUCCESS)
+        {
+            UrbStatus = USBD_STATUS_SUCCESS;
+        }
+        else
+        {
+            UrbStatus = USBD_STATUS_INVALID_PARAMETER;
+        }
+
+        //
+        // get request
+        //
+        Request = (PXHCIREQUEST)CommandDescriptor->Request;
+
+        //
+        // notify request that transfer has completed
+        //
+        Request->CompletionCallback(UrbStatus != USBD_STATUS_SUCCESS ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS, UrbStatus);
+
+        //
+        // free command descriptor
+        //
+        Request->FreeCommandDescriptor(CommandDescriptor);
+
+        //
+        // free request
+        //
+        Request->Release();
+    }
+
+    //
+    // release the lock
+    //
+    KeReleaseSpinLock(m_Lock, OldIrql);
+
+    //
+    // great success
+    //
     return;
 }
 
@@ -320,6 +699,7 @@ CUSBQueue::GetEventRingDequeuePointer(VOID)
     // setup dequeue pointer(mark event as processed)
     //
     m_Hardware->SetRuntimeRegister(XHCI_ERDP_BASE_LOW, PhysicalAddress.LowPart | XHCI_ERST_EHB);
+    m_Hardware->SetRuntimeRegister(XHCI_ERDP_BASE_HIGH, PhysicalAddress.HighPart);
     
     //
     // found trb

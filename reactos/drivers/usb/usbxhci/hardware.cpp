@@ -1189,6 +1189,23 @@ CUSBHardwareDevice::SetOperationalRegister(
     WRITE_OPERATIONAL_REG_ULONG(Offset, Value);
 }
 
+NTSTATUS
+STDMETHODCALLTYPE
+CUSBHardwareDevice::GetDeviceInformationByAddress(
+    IN ULONG DeviceAddress,
+    OUT PDEVICE_INFORMATION *DeviceInformation)
+{
+    UNREFERENCED_PARAMETER(DeviceAddress);
+    UNREFERENCED_PARAMETER(DeviceInformation);
+
+    *DeviceInformation = NULL;
+
+    //
+    // TODO: implement searching for device slot by address
+    //
+    return STATUS_SUCCESS;
+}
+
 BOOLEAN
 NTAPI
 InterruptServiceRoutine(
@@ -1318,6 +1335,15 @@ XhciDeferredRoutine(
             ExQueueWorkItem(&This->m_StatusChangeWorkItem, DelayedWorkQueue);
         }
     }
+}
+
+VOID
+CUSBHardwareDevice::RingDoorbellRegister(
+    IN ULONG SlotId,
+    IN ULONG Endpoint,
+    IN ULONG StreamId)
+{
+    WRITE_DOORBELL_REG_ULONG(XHCI_DOORBELL(SlotId), XHCI_DOORBELL_TARGET(Endpoint) | XHCI_DOORBELL_STREAMID(StreamId));
 }
 
 VOID

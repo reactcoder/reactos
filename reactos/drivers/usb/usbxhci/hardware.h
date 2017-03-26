@@ -156,6 +156,8 @@ typedef struct _XHCI_CAPABILITY_REGS
 
 #define XHCI_CRCR_RCS  0x01 // Ring Cycle State 
 
+#define XHCI_GET_PAGE_SIZE(n) (1 << (12 + n))
+
 typedef struct _USBCMD_REG
 {
     ULONG RUNSTOP :  1; // Run/Stop
@@ -352,7 +354,9 @@ typedef struct _RUNTIME_REGS
 // Doorbell Registers
 //
 #define XHCI_DOORBELL(n)              (0x0000 + (4 * (n)))
+#define XHCI_DOORBELL_TARGET(x)       ((x) & 0xFF)
 #define XHCI_DOORBELL_TARGET_GET(x)   ((x) & 0xFF)
+#define XHCI_DOORBELL_STREAMID(x)     (((x) & 0xFFFF) << 16)
 #define XHCI_DOORBELL_STREAMID_GET(x) (((x) >> 16) & 0xFFFF)
 
 typedef struct _DOORBELL_REGISTER
@@ -433,32 +437,38 @@ typedef struct _SLOT_CONTEXT
 //
 // 6.2.3 Endpoint Context
 //
-#define XHCI_ENDPOINT_STATE(x)             ((x) & 0x3)
-#define XHCI_GET_ENDPOINT_STATE_GET(x)     ((x) & 0x3)
-#define XHCI_ENDPOINT_MULT(x)              (((x) & 0x3) << 8)
-#define XHCI_GET_ENDPOINT_MULT(x)          (((x) >> 8) & 0x3)
-#define XHCI_ENDPOINT_MAXPSTREAMS(x)       (((x) & 0x1F) << 10)
-#define XHCI_GET_ENDPOINT_MAXPSTREAMS(x)   (((x) >> 10) & 0x1F)
-#define XHCI_ENDPOINT_LSA_BIT              (1 << 15)
-#define XHCI_ENDPOINT_INTERVAL(x)          (((x) & 0xFF) << 16)
-#define XHCI_GET_ENDPOINT_INTERVAL(x)      (((x) >> 16) & 0xFF)
-                                           
-#define XHCI_ENDPOINT_CERR(x)              (((x) & 0x3) << 1)
-#define XHCI_GET_ENDPOINT_CERR(x)          (((x) >> 1) & 0x3)
-#define XHCI_ENDPOINT_EPTYPE(x)            (((x) & 0x7) << 3)
-#define XHCI_GET_ENDPOINT_EPTYPE(x)        (((x) >> 3) & 0x7)
-#define XHCI_ENDPOINT_HID_BIT              (1 << 7)
-#define XHCI_ENDPOINT_MAXBURST(x)          (((x) & 0xFF) << 8)
-#define XHCI_GET_ENDPOINT_MAXBURST(x)      (((x) >> 8) & 0xFF)
-#define XHCI_ENDPOINT_MAXPACKETSIZE(x)     (((x) & 0xFFFF) << 16)
-#define XHCI_GET_ENDPOINT_MAXPACKETSIZE(x) (((x) >> 16) & 0xFFFF)
+#define XHCI_ENDPOINT_STATE(x)              ((x) & 0x3)
+#define XHCI_GET_ENDPOINT_STATE_GET(x)      ((x) & 0x3)
+#define XHCI_ENDPOINT_MULT(x)               (((x) & 0x3) << 8)
+#define XHCI_GET_ENDPOINT_MULT(x)           (((x) >> 8) & 0x3)
+#define XHCI_ENDPOINT_MAXPSTREAMS(x)        (((x) & 0x1F) << 10)
+#define XHCI_GET_ENDPOINT_MAXPSTREAMS(x)    (((x) >> 10) & 0x1F)
+#define XHCI_ENDPOINT_LSA_BIT               (1 << 15)
+#define XHCI_ENDPOINT_INTERVAL(x)           (((x) & 0xFF) << 16)
+#define XHCI_GET_ENDPOINT_INTERVAL(x)       (((x) >> 16) & 0xFF)
+                                            
+#define XHCI_ENDPOINT_CERR(x)               (((x) & 0x3) << 1)
+#define XHCI_GET_ENDPOINT_CERR(x)           (((x) >> 1) & 0x3)
+#define XHCI_ENDPOINT_EPTYPE(x)             (((x) & 0x7) << 3)
+#define XHCI_GET_ENDPOINT_EPTYPE(x)         (((x) >> 3) & 0x7)
+#define XHCI_ENDPOINT_HID_BIT               (1 << 7)
+#define XHCI_ENDPOINT_MAXBURST(x)           (((x) & 0xFF) << 8)
+#define XHCI_GET_ENDPOINT_MAXBURST(x)       (((x) >> 8) & 0xFF)
+#define XHCI_ENDPOINT_MAXPACKETSIZE(x)      (((x) & 0xFFFF) << 16)
+#define XHCI_GET_ENDPOINT_MAXPACKETSIZE(x)  (((x) >> 16) & 0xFFFF)
 
-#define XHCI_ENDPOINT_DCS_BIT           (1 << 0)
+#define XHCI_ENDPOINT_DCS_BIT               (1 << 0)
 
 #define XHCI_ENDPOINT_AVGTRBLENGTH(x)       ((x) & 0xFFFF)
 #define XHCI_GET_ENDPOINT_AVGTRBLENGTH(x)   ((x) & 0xFFFF)
 #define XHCI_ENDPOINT_MAXESITPAYLOAD(x)     (((x) & 0xFFFF) << 16)
 #define XHCI_GET_ENDPOINT_MAXESITPAYLOAD(x) (((x) >> 16) & 0xFFFF)
+
+#define XHCI_ENDPOINT_STATE_DISABLED        0x00
+#define XHCI_ENDPOINT_STATE_RUNNING         0x01
+#define XHCI_ENDPOINT_STATE_HALTED          0x02
+#define XHCI_ENDPOINT_STATE_STOPPED         0x03
+#define XHCI_ENDPOINT_STATE_ERROR           0x04
 
 #define XHCI_ENDPOINT_ISOCHRONOUS_OUT       0x01
 #define XHCI_ENDPOINT_BULK_OUT              0x02
@@ -654,10 +664,69 @@ typedef struct _TRB
 //
 // 6.5 Event Ring Segment Table
 //
-typedef struct _ERST_ELEMENT
+typedef struct DECLSPEC_ALIGN(64) _ERST_ELEMENT
 {
     PHYSICAL_ADDRESS Address;
     ULONG            Size;
     ULONG            Reserved;
 }ERST_ELEMENT, *PERST_ELEMENT;
+
+//-------------------------------------------------------------------------------------
+
+//
+// command information
+//
+typedef struct _COMMAND_INFORMATION
+{
+    ULONG            CommandType;
+    PHYSICAL_ADDRESS InputContext;
+    BOOLEAN          BlockSetRequest;
+    BOOLEAN          Deconfigure;
+    ULONG            SlotId;
+    ULONG            Endpoint;
+    BOOLEAN          Preserve;
+    ULONG            Stream;
+}COMMAND_INFORMATION, *PCOMMAND_INFORMATION;
+
+#define USB_TARGET_XHCI     1
+#define USB_TARGET_DEVICE   2
+
+//
+// XHCI command descriptor
+//
+typedef struct _COMMAND_DESCRIPTOR
+{
+    // Hardware
+    PTRB             PhysicalTrbAddress;
+    
+    // Software
+    PTRB             VirtualTrbAddress;
+    PTRB             CompletedTrb;
+    ULONG            CommandType;
+    PHYSICAL_ADDRESS DequeueAddress;
+    PVOID            Request;
+    LIST_ENTRY       DescriptorListEntry;
+}COMMAND_DESCRIPTOR, *PCOMMAND_DESCRIPTOR;
+
+
+//
+// device info
+//
+typedef struct _PDEVICE_INFORMATION
+{
+    ULONG                 SlotId;
+    ULONG                 State;
+    ULONG                 Address;
+
+    PHYSICAL_ADDRESS      PhysicalInputContextAddress;
+    PINPUT_DEVICE_CONTEXT InputContextAddress;
+
+    PHYSICAL_ADDRESS      PhysicalDeviceContextAddress;
+    PDEVICE_CONTEXT       DeviceContextAddress;
+
+    //ENDPOINT              Endpoints[31];
+
+    ULONG                 PortId;
+    LIST_ENTRY            DeviceListEntry;
+}DEVICE_INFORMATION, *PDEVICE_INFORMATION;
 #endif // XHCI_HARWARE_H_

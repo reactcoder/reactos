@@ -499,6 +499,7 @@ CUSBHardwareDevice::StartController(VOID)
     PHYSICAL_ADDRESS  PhysicalBaseAddress;
     PLARGE_INTEGER VirtualBaseAddress;
     ULONG Register;
+    ULONG Size;
 
     //
     // get extended capabilities pointer
@@ -594,8 +595,13 @@ CUSBHardwareDevice::StartController(VOID)
     ASSERT(m_Capabilities.HcsParams1.MaxSlots);
     WRITE_OPERATIONAL_REG_ULONG(XHCI_CONFIG, m_Capabilities.HcsParams1.MaxSlots);
 
+    // 
+    // disable device notifications
     //
-    // allocate memory for device context base address array
+    WRITE_OPERATIONAL_REG_ULONG(XHCI_DNCTRL, 0);
+
+    //
+    // allocate memory for device context base address array + scratchpad pointer
     //
     Status = m_MemoryManager->Allocate((m_Capabilities.HcsParams1.MaxSlots + 1) * sizeof(PHYSICAL_ADDRESS), (PVOID*)&m_DeviceContextArray, &m_PhysicalDeviceContextArray);
     if (!NT_SUCCESS(Status))
@@ -603,57 +609,74 @@ CUSBHardwareDevice::StartController(VOID)
         DPRINT1("Failed to allocate memory for DCBA.\n");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-
+    
     //
     // allocate memory for scratchpad buffers(for xHCI internal use)
     //
     Count = (m_Capabilities.HcsParams2.MaxScratchPadBufsHi << 5) | m_Capabilities.HcsParams2.MaxScratchPadBufsLo;
-    if (Count)
+  
+    //
+    // calculate the size of the scratchpad buffers array
+    //
+    Size = Count ? sizeof(PHYSICAL_ADDRESS) * Count : sizeof(PHYSICAL_ADDRESS);
+
+    //
+    // allocate memory for scratchpad buffers array
+    //
+    Status = m_MemoryManager->Allocate(Size, (PVOID*)&VirtualBaseAddress, &PhysicalBaseAddress);
+    if (!NT_SUCCESS(Status))
     {
         //
-        // allocate memory for scratchpad buffers array
+        // TODO: free prev allocated resources
         //
-        Status = m_MemoryManager->Allocate(sizeof(PHYSICAL_ADDRESS) * Count, (PVOID*)&VirtualBaseAddress, &PhysicalBaseAddress);
+        DPRINT1("Failed to allocate memory for scrachpad array.\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    //
+    // get XHCI page size
+    //
+    Size = READ_OPERATIONAL_REG_ULONG(XHCI_PAGE_SIZE);
+    Index = 0;
+    while (!(Size & 0x1))
+    {
+        Index = Index + 1;
+        Size = Size >> 1;
+    }
+
+    //
+    // compute page size(default page size is 4096)
+    //
+    Size = XHCI_GET_PAGE_SIZE(Index);
+
+    //
+    // initialize scratchpad buffers array
+    //
+    for (Index = 0; Index < Count; Index++)
+    {
+        Status = m_MemoryManager->Allocate(Size, (PVOID*)&VirtualBase, &PhysicalAddress);
         if (!NT_SUCCESS(Status))
         {
-            //
-            // TODO: free prev allocated resources
-            //
-            DPRINT1("Failed to allocate memory for scrachpad array.\n");
+            DPRINT1("Failed to allocate memory for scratchpad buffers.\n");
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         //
-        // initialize scratchpad buffers array
+        // setup element
         //
-        for (Index = 0; Index < Count; Index++)
-        {
-            Status = m_MemoryManager->Allocate(XHCI_PAGE_SIZE, (PVOID*)&VirtualBase, &PhysicalAddress);
-            if (!NT_SUCCESS(Status))
-            {
-                DPRINT1("Failed to allocate memory for scratchpad buffers.\n");
-                return STATUS_INSUFFICIENT_RESOURCES;
-            }
-
-            //
-            // setup element
-            //
-            VirtualBaseAddress[Index].QuadPart = PhysicalAddress.QuadPart;
-        }
-
-        //
-        // first element in device context array must be a pointer to scratchpad buffers array
-        //
-        m_DeviceContextArray[0].QuadPart = PhysicalBaseAddress.QuadPart;
+        VirtualBaseAddress[Index].QuadPart = PhysicalAddress.QuadPart;
     }
+
+    //
+    // first element in device context array must be a pointer to scratchpad buffers array
+    //
+    m_DeviceContextArray[0].QuadPart = PhysicalBaseAddress.QuadPart;
 
     //
     // set Device Context Base Address Array Pointer
     //
     WRITE_OPERATIONAL_REG_ULONG(XHCI_DCBAAP_LOW, m_PhysicalDeviceContextArray.LowPart);
     WRITE_OPERATIONAL_REG_ULONG(XHCI_DCBAAP_HIGH, m_PhysicalDeviceContextArray.HighPart);
-
-    // after reset all notifications are disabled(5.4.4)
 
     //
     // initialize UsbQueue

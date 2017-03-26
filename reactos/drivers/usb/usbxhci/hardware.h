@@ -289,7 +289,7 @@ typedef struct _OPERATIONAL_REGS
 #define XHCI_ERSTBA_LOW     0x30
 #define XHCI_ERSTBA_HIGH    0x34
 #define XHCI_ERDP_BASE_LOW  0x38
-#define XHCI_ERDP_BASE_HIGH 0x38
+#define XHCI_ERDP_BASE_HIGH 0x3C
 
 #define XHCI_ERST_EHB       0x08
 

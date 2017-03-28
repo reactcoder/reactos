@@ -316,7 +316,7 @@ CUSBQueue::AddUSBRequest(
     }
 
     //
-    // add aextra referece which is released when the request is completed
+    // add a extra referece which is released when the request is completed
     //
     Request->AddRef();
 
@@ -451,12 +451,6 @@ NTSTATUS
 CUSBQueue::LinkCommandDescriptor(IN PCOMMAND_DESCRIPTOR CommandDescriptor)
 {
     ULONG LinkTransferRequestBlock;
-    KIRQL OldIrql;
-
-    //
-    // acquire the lock
-    //
-    KeAcquireSpinLock(m_Lock, &OldIrql);
 
     //
     // put request in the queue
@@ -520,11 +514,6 @@ CUSBQueue::LinkCommandDescriptor(IN PCOMMAND_DESCRIPTOR CommandDescriptor)
     // insert it in the list
     //
     InsertTailList(&m_CommandRingList, &CommandDescriptor->DescriptorListEntry);
-
-    //
-    // release the lock
-    //
-    KeReleaseSpinLock(m_Lock, OldIrql);
 
     //
     // ring the doorbell for XHCI

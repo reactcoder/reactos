@@ -2,7 +2,7 @@
  * COPYRIGHT:   See COPYING in the top level directory
  * PROJECT:     ReactOS WinSock 2 API
  * FILE:        dll/win32/ws2_32_new/src/rnr.c
- * PURPOSE:     Registration n' Resolution Support
+ * PURPOSE:     Registration and Resolution Support
  * PROGRAMMER:  Alex Ionescu (alex@relsoft.net)
  */
 
@@ -34,6 +34,7 @@ WSAAddressToStringA(IN LPSOCKADDR lpsaAddress,
     PTCATALOG_ENTRY CatalogEntry;
     LPWSTR UnicodeString;
     DWORD Length = *lpdwAddressStringLength;
+
     DPRINT("WSAAddressToStringA: %p\n", lpsaAddress);
 
     /* Enter prolog */
@@ -74,7 +75,7 @@ WSAAddressToStringA(IN LPSOCKADDR lpsaAddress,
                                        lpsaAddress->sa_family,
                                        &CatalogEntry);
     }
-    
+
     /* Check for success */
     if (ErrorCode == ERROR_SUCCESS)
     {
@@ -136,6 +137,7 @@ WSAAddressToStringW(IN LPSOCKADDR lpsaAddress,
     DWORD CatalogEntryId;
     PTCATALOG Catalog;
     PTCATALOG_ENTRY CatalogEntry;
+
     DPRINT("WSAAddressToStringW: %p\n", lpsaAddress);
 
     /* Enter prolog */
@@ -167,7 +169,7 @@ WSAAddressToStringW(IN LPSOCKADDR lpsaAddress,
                                        lpsaAddress->sa_family,
                                        &CatalogEntry);
     }
-    
+
     /* Check for success */
     if (ErrorCode == ERROR_SUCCESS)
     {
@@ -203,6 +205,7 @@ WSALookupServiceEnd(IN HANDLE hLookup)
     PWSTHREAD Thread;
     INT ErrorCode;
     PNSQUERY Query = hLookup;
+
     DPRINT("WSALookupServiceEnd: %lx\n", hLookup);
 
     /* Enter prolog */
@@ -246,10 +249,11 @@ WSALookupServiceBeginA(IN LPWSAQUERYSETA lpqsRestrictions,
     INT ErrorCode;
     LPWSAQUERYSETW UnicodeQuerySet = NULL;
     DWORD UnicodeQuerySetSize = 0;
+
     DPRINT("WSALookupServiceBeginA: %p\n", lpqsRestrictions);
 
     /* Verify pointer */
-    if (IsBadReadPtr(lpqsRestrictions, sizeof(*lpqsRestrictions)) || 
+    if (IsBadReadPtr(lpqsRestrictions, sizeof(*lpqsRestrictions)) ||
         IsBadReadPtr(lpqsRestrictions->lpServiceClassId, sizeof(*lpqsRestrictions->lpServiceClassId)))
     {
         /* Invalid */
@@ -285,11 +289,6 @@ WSALookupServiceBeginA(IN LPWSAQUERYSETA lpqsRestrictions,
                                                    dwControlFlags,
                                                    lphLookup);
             }
-            else
-            {
-                /* Fail, conversion failed */
-                SetLastError(ErrorCode);
-            }
 
             /* Free our buffer */
             HeapFree(WsSockHeap, 0, UnicodeQuerySet);
@@ -297,14 +296,13 @@ WSALookupServiceBeginA(IN LPWSAQUERYSETA lpqsRestrictions,
         else
         {
             /* No memory to allocate */
-            SetLastError(WSAEFAULT);
+            ErrorCode = WSAEFAULT;
         }
     }
-    else
-    {
-        /* We couldn't get the size for some reason */
+
+    /* Set the error in case of failure */
+    if (ErrorCode != ERROR_SUCCESS)
         SetLastError(ErrorCode);
-    }
 
     /* Return to caller */
     return ErrorCode == ERROR_SUCCESS ? ErrorCode : SOCKET_ERROR;
@@ -313,7 +311,7 @@ WSALookupServiceBeginA(IN LPWSAQUERYSETA lpqsRestrictions,
 /*
  * @implemented
  */
-INT 
+INT
 WINAPI
 WSALookupServiceBeginW(IN LPWSAQUERYSETW lpqsRestrictions,
                        IN DWORD dwControlFlags,
@@ -323,6 +321,7 @@ WSALookupServiceBeginW(IN LPWSAQUERYSETW lpqsRestrictions,
     PWSTHREAD Thread;
     INT ErrorCode;
     PNSQUERY Query;
+
     DPRINT("WSALookupServiceBeginW: %p\n", lpqsRestrictions);
 
     /* Enter prolog */
@@ -374,7 +373,7 @@ WSALookupServiceBeginW(IN LPWSAQUERYSETW lpqsRestrictions,
         ErrorCode = SOCKET_ERROR;
         SetLastError(WSAENOBUFS);
     }
-    
+
     /* Return */
     return ErrorCode;
 }
@@ -393,6 +392,7 @@ WSALookupServiceNextW(IN HANDLE hLookup,
     PWSTHREAD Thread;
     INT ErrorCode;
     PNSQUERY Query = hLookup;
+
     DPRINT("WSALookupServiceNextW: %lx\n", hLookup);
 
     /* Enter prolog */
@@ -403,8 +403,12 @@ WSALookupServiceNextW(IN HANDLE hLookup,
         return SOCKET_ERROR;
     }
 
-    /* Verify pointer */
-    if (IsBadWritePtr(lpqsResults, sizeof(*lpqsResults)))
+    /*
+     * Verify pointers. Note that the size of the buffer
+     * pointed by lpqsResults is given by *lpdwBufferLength.
+     */
+    if (IsBadReadPtr(lpdwBufferLength, sizeof(*lpdwBufferLength)) ||
+        IsBadWritePtr(lpqsResults, *lpdwBufferLength))
     {
         /* It is invalid; fail */
         SetLastError(WSAEFAULT);
@@ -443,22 +447,48 @@ WSALookupServiceNextA(IN HANDLE hLookup,
                       OUT LPWSAQUERYSETA lpqsResults)
 {
     LPWSAQUERYSETW UnicodeQuerySet;
-    DWORD UnicodeQuerySetSize = *lpdwBufferLength;
+    DWORD UnicodeQuerySetSize;
     INT ErrorCode;
+
     DPRINT("WSALookupServiceNextA: %lx\n", hLookup);
+
+    /*
+     * Verify pointers. Note that the size of the buffer
+     * pointed by lpqsResults is given by *lpdwBufferLength.
+     */
+    if (IsBadReadPtr(lpdwBufferLength, sizeof(*lpdwBufferLength)) ||
+        IsBadWritePtr(lpqsResults, *lpdwBufferLength))
+    {
+        /* It is invalid; fail */
+        SetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
+    UnicodeQuerySetSize = *lpdwBufferLength;
 
     /* Check how much the user is giving */
     if (UnicodeQuerySetSize >= sizeof(WSAQUERYSETW))
     {
         /* Allocate the buffer we'll use */
         UnicodeQuerySet = HeapAlloc(WsSockHeap, 0, UnicodeQuerySetSize);
-        if (!UnicodeQuerySet) UnicodeQuerySetSize = 0;
+        if (!UnicodeQuerySet)
+        {
+            /*
+             * We failed, possibly because the specified size was too large?
+             * Retrieve the needed buffer size with the WSALookupServiceNextW
+             * call and retry again a second time.
+             */
+            UnicodeQuerySetSize = 0;
+        }
     }
     else
     {
-        /* His buffer is too small */
-        UnicodeQuerySetSize = 0;
+        /*
+         * The buffer is too small. Retrieve the needed buffer size with
+         * the WSALookupServiceNextW call and return it to the caller.
+         */
         UnicodeQuerySet = NULL;
+        UnicodeQuerySetSize = 0;
     }
 
     /* Call the Unicode Function */
@@ -466,13 +496,39 @@ WSALookupServiceNextA(IN HANDLE hLookup,
                                       dwControlFlags,
                                       &UnicodeQuerySetSize,
                                       UnicodeQuerySet);
+
+    /*
+     * Check whether we actually just retrieved the needed buffer size
+     * because our previous local allocation did fail. If so, allocate
+     * a new buffer and retry again.
+     */
+    if ( (!UnicodeQuerySet) && (*lpdwBufferLength >= sizeof(WSAQUERYSETW)) &&
+         (ErrorCode == SOCKET_ERROR) && (GetLastError() == WSAEFAULT) )
+    {
+        /* Allocate the buffer we'll use */
+        UnicodeQuerySet = HeapAlloc(WsSockHeap, 0, UnicodeQuerySetSize);
+        if (UnicodeQuerySet)
+        {
+            /* Call the Unicode Function */
+            ErrorCode = WSALookupServiceNextW(hLookup,
+                                              dwControlFlags,
+                                              &UnicodeQuerySetSize,
+                                              UnicodeQuerySet);
+        }
+        /*
+         * Otherwise the allocation failed and we
+         * fall back into the error checks below.
+         */
+    }
+
     if (ErrorCode == ERROR_SUCCESS)
     {
-        /* Not convert to ANSI */
+        /* Now convert back to ANSI */
         ErrorCode = MapUnicodeQuerySetToAnsi(UnicodeQuerySet,
                                              lpdwBufferLength,
                                              lpqsResults);
-        if (ErrorCode != ERROR_SUCCESS) SetLastError(ErrorCode);
+        if (ErrorCode != ERROR_SUCCESS)
+            SetLastError(ErrorCode);
     }
     else
     {
@@ -486,10 +542,11 @@ WSALookupServiceNextA(IN HANDLE hLookup,
     }
 
     /* If we had a local buffer, free it */
-    if (UnicodeQuerySet) HeapFree(WsSockHeap, 0, UnicodeQuerySet);
+    if (UnicodeQuerySet)
+        HeapFree(WsSockHeap, 0, UnicodeQuerySet);
 
     /* Return to caller */
-    return ErrorCode == ERROR_SUCCESS ? ErrorCode : SOCKET_ERROR;
+    return (ErrorCode == ERROR_SUCCESS) ? ErrorCode : SOCKET_ERROR;
 }
 
 /*
@@ -728,6 +785,7 @@ WSAEnumNameSpaceProvidersInternal(IN OUT LPDWORD lpdwBufferLength,
     PWSPROCESS WsProcess;
     PNSCATALOG Catalog;
     NSPROVIDER_ENUM_CONTEXT Context;
+
     DPRINT("WSAEnumNameSpaceProvidersInternal: %lx\n", lpnspBuffer);
 
     if (!lpdwBufferLength)
@@ -823,6 +881,7 @@ WSAStringToAddressA(IN LPSTR AddressString,
     PTCATALOG_ENTRY CatalogEntry;
     LPWSTR UnicodeString;
     DWORD Length = (DWORD)strlen(AddressString) + 1;
+
     DPRINT("WSAStringToAddressA: %s\n", AddressString);
 
     /* Enter prolog */
@@ -864,7 +923,7 @@ WSAStringToAddressA(IN LPSTR AddressString,
         /* Get it from the address family */
         ErrorCode = WsTcGetEntryFromAf(Catalog, AddressFamily, &CatalogEntry);
     }
-    
+
     /* Check for success */
     if (ErrorCode == ERROR_SUCCESS)
     {
@@ -914,6 +973,7 @@ WSAStringToAddressW(IN LPWSTR AddressString,
     DWORD CatalogEntryId;
     PTCATALOG Catalog;
     PTCATALOG_ENTRY CatalogEntry;
+
     DPRINT("WSAStringToAddressW: %S\n", AddressString);
 
     /* Enter prolog */
@@ -943,7 +1003,7 @@ WSAStringToAddressW(IN LPWSTR AddressString,
         /* Get it from the address family */
         ErrorCode = WsTcGetEntryFromAf(Catalog, AddressFamily, &CatalogEntry);
     }
-    
+
     /* Check for success */
     if (ErrorCode == ERROR_SUCCESS)
     {

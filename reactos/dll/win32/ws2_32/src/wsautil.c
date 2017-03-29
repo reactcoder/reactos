@@ -26,20 +26,20 @@ WsOpenRegistryRoot(VOID)
                              0,
                              MAXIMUM_ALLOWED,
                              &WinsockRootKey);
-    
+
     /* Check if it wasn't found */
     if (ErrorCode == ERROR_FILE_NOT_FOUND)
     {
         /* Create it */
-        RegCreateKeyEx(HKEY_LOCAL_MACHINE,
-                       WINSOCK_ROOT,
-                       0,
-                       NULL,
-                       REG_OPTION_NON_VOLATILE,
-                       KEY_ALL_ACCESS,
-                       NULL,
-                       &WinsockRootKey,
-                       &CreateDisposition);
+        ErrorCode = RegCreateKeyEx(HKEY_LOCAL_MACHINE,
+                                   WINSOCK_ROOT,
+                                   0,
+                                   NULL,
+                                   REG_OPTION_NON_VOLATILE,
+                                   KEY_ALL_ACCESS,
+                                   NULL,
+                                   &WinsockRootKey,
+                                   &CreateDisposition);
     }
     else if (ErrorCode == ERROR_SUCCESS)
     {

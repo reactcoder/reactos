@@ -17,7 +17,7 @@ WSAAPI
 WsNqProvAllocate(VOID)
 {
     PNSQUERY_PROVIDER Provider;
-    
+
     /* Allocate the object */
     Provider = HeapAlloc(WsSockHeap, HEAP_ZERO_MEMORY, sizeof(*Provider));
 
@@ -63,15 +63,17 @@ WSAAPI
 WsNpAllocate(VOID)
 {
     PNS_PROVIDER Provider;
-    
+
     /* Allocate the object */
     Provider = HeapAlloc(WsSockHeap, HEAP_ZERO_MEMORY, sizeof(*Provider));
+    if (Provider)
+    {
+        /* Set non-null data */
+        Provider->RefCount = 1;
+        Provider->Service.cbSize = sizeof(NSP_ROUTINE);
+    }
 
-    /* Set non-null data */
-    Provider->RefCount = 1;
-    Provider->Service.cbSize = sizeof(NSP_ROUTINE);
-
-    /* Return us */
+    /* Return it */
     return Provider;
 }
 
@@ -84,7 +86,7 @@ WsNpInitialize(IN PNS_PROVIDER Provider,
     INT ErrorCode = ERROR_SUCCESS;
     LPNSPSTARTUP NSPStartupProc;
     CHAR AnsiPath[MAX_PATH], ExpandedDllPath[MAX_PATH];
-    
+
     /* Convert the path to ANSI */
     WideCharToMultiByte(CP_ACP,
                         0,
@@ -120,7 +122,7 @@ WsNpInitialize(IN PNS_PROVIDER Provider,
     }
 
     /* Call it */
-    (*NSPStartupProc)(ProviderId, (LPNSP_ROUTINE)&Provider->Service.cbSize);
+    (*NSPStartupProc)(ProviderId, &Provider->Service);
 
     /* Save the provider ID */
     Provider->ProviderId = *ProviderId;
@@ -129,6 +131,7 @@ WsNpInitialize(IN PNS_PROVIDER Provider,
 Fail:
     /* Bail out */
     if (Provider->DllHandle) FreeLibrary(Provider->DllHandle);
+    Provider->DllHandle = NULL;
     return ErrorCode;
 }
 
@@ -138,7 +141,7 @@ WsNpNSPCleanup(IN PNS_PROVIDER Provider)
 {
     INT ErrorCode = ERROR_SUCCESS;
     LPNSPCLEANUP lpNSPCleanup = NULL;
-    
+
     /* Make sure we have a loaded handle */
     if (Provider->DllHandle)
     {
@@ -165,10 +168,11 @@ WsNpDelete(IN PNS_PROVIDER Provider)
 
         /* Unload the library */
         FreeLibrary(Provider->DllHandle);
-
-        /* Clear the handle value */
         Provider->DllHandle = NULL;
     }
+
+    /* Delete us */
+    HeapFree(WsSockHeap, 0, Provider);
 }
 
 VOID

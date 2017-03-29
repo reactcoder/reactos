@@ -460,7 +460,6 @@ DsppReinitialize (
         !(GraphicsConsole) ||
         !(((PBL_GRAPHICS_CONSOLE_VTABLE)GraphicsConsole->TextConsole.Callbacks)->IsEnabled(GraphicsConsole)))
     {
-        EfiPrintf(L"Nothing to do for re-init\r\n");
         return Status;
     }
 
@@ -548,7 +547,7 @@ BlpDisplayReinitialize (
     VOID
     )
 {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_SUCCESS;
     PBL_TEXT_CONSOLE TextConsole;
     PBL_INPUT_CONSOLE InputConsole;
 

@@ -99,7 +99,7 @@ IntGetClientRect(PWND Wnd, RECTL *Rect)
       Rect->bottom = UserGetSystemMetrics(SM_CYMINIMIZED);
       return;
    }
-   if ( Wnd != UserGetDesktopWindow()) // Wnd->fnid != FNID_DESKTOP )
+   if (!UserIsDesktopWindow(Wnd))
    {
       *Rect = Wnd->rcClient;
       RECTL_vOffsetRect(Rect, -Wnd->rcClient.left, -Wnd->rcClient.top);
@@ -122,7 +122,7 @@ IntGetWindowRect(PWND Wnd, RECTL *Rect)
    ASSERT( Wnd );
    ASSERT( Rect );
    if (!Wnd) return FALSE;
-   if ( Wnd != UserGetDesktopWindow()) // Wnd->fnid != FNID_DESKTOP )
+   if (!UserIsDesktopWindow(Wnd))
    {
        *Rect = Wnd->rcWindow;
    }
@@ -151,7 +151,7 @@ IntMapWindowPoints(PWND FromWnd, PWND ToWnd, LPPOINT lpPoints, UINT cPoints)
     Delta.x = Delta.y = 0;
     mirror_from = mirror_to = FALSE;
 
-    if (FromWnd && FromWnd != UserGetDesktopWindow()) // FromWnd->fnid != FNID_DESKTOP)
+    if (FromWnd && !UserIsDesktopWindow(FromWnd))
     {
        if (FromWnd->ExStyle & WS_EX_LAYOUTRTL)
        {
@@ -164,7 +164,7 @@ IntMapWindowPoints(PWND FromWnd, PWND ToWnd, LPPOINT lpPoints, UINT cPoints)
        Delta.y = FromWnd->rcClient.top;
     }
 
-    if (ToWnd && ToWnd != UserGetDesktopWindow()) // ToWnd->fnid != FNID_DESKTOP)
+    if (ToWnd && !UserIsDesktopWindow(ToWnd))
     {
        if (ToWnd->ExStyle & WS_EX_LAYOUTRTL)
        {
@@ -255,7 +255,7 @@ PWND FASTCALL IntGetLastTopMostWindow(VOID)
 }
 
 VOID
-SelectWindowRgn( PWND Window, HRGN hRgnClip)
+SelectWindowRgn(PWND Window, HRGN hRgnClip)
 {
     if (Window->hrgnClip)
     {
@@ -267,7 +267,7 @@ SelectWindowRgn( PWND Window, HRGN hRgnClip)
 
     if (hRgnClip > HRGN_WINDOW)
     {
-        /*if (Window != UserGetDesktopWindow()) // Window->fnid != FNID_DESKTOP)
+        /*if (!UserIsDesktopWindow(Window))
         {
             NtGdiOffsetRgn(hRgnClip, Window->rcWindow.left, Window->rcWindow.top);
         }*/
@@ -480,7 +480,7 @@ WinPosInitInternalPos(PWND Wnd, RECTL *RestoreRect)
    POINT Size;
    RECTL Rect = *RestoreRect;
 
-   if (Wnd->spwndParent && Wnd->spwndParent != UserGetDesktopWindow())
+   if (Wnd->spwndParent && !UserIsDesktopWindow(Wnd->spwndParent))
    {
       RECTL_vOffsetRect(&Rect,
                         -Wnd->spwndParent->rcClient.left,
@@ -782,7 +782,7 @@ WinPosFindIconPos(PWND Window, POINT *Pos)
    int x, y, xspacing, yspacing;
 
    pwndParent = Window->spwndParent;
-   if (pwndParent == UserGetDesktopWindow())
+   if (UserIsDesktopWindow(pwndParent))
    {
       ERR("FIXME: Parent is Desktop, Min off screen!\n");
       /* FIXME: ReactOS doesn't support iconic minimize to desktop */
@@ -835,153 +835,6 @@ WinPosFindIconPos(PWND Window, POINT *Pos)
    Window->InternalPos.flags |= WPF_MININIT;
    TRACE("Position is set! X:%d Y:%d\n",Pos->x,Pos->y);
    return;
-}
-
-UINT FASTCALL
-co_WinPosMinMaximize(PWND Wnd, UINT ShowFlag, RECT* NewPos)
-{
-   POINT Size;
-   WINDOWPLACEMENT wpl;
-   LONG old_style;
-   UINT SwpFlags = 0;
-
-   ASSERT_REFS_CO(Wnd);
-
-   wpl.length = sizeof(wpl);
-   IntGetWindowPlacement( Wnd, &wpl );
-
-   if (co_HOOK_CallHooks( WH_CBT, HCBT_MINMAX, (WPARAM)Wnd->head.h, ShowFlag))
-   {
-      ERR("WinPosMinMaximize WH_CBT Call Hook return!\n");
-      return SWP_NOSIZE | SWP_NOMOVE;
-   }
-      if (Wnd->style & WS_MINIMIZE)
-      {
-         switch (ShowFlag)
-         {
-         case SW_MINIMIZE:
-         case SW_SHOWMINNOACTIVE:
-         case SW_SHOWMINIMIZED:
-         case SW_FORCEMINIMIZE:
-             return SWP_NOSIZE | SWP_NOMOVE;
-         }
-         if (!co_IntSendMessageNoWait(Wnd->head.h, WM_QUERYOPEN, 0, 0))
-         {
-            return(SWP_NOSIZE | SWP_NOMOVE);
-         }
-         SwpFlags |= SWP_NOCOPYBITS;
-      }
-      switch (ShowFlag)
-      {
-         case SW_MINIMIZE:
-         case SW_SHOWMINNOACTIVE:
-         case SW_SHOWMINIMIZED:
-         case SW_FORCEMINIMIZE:
-            {
-               //ERR("MinMaximize Minimize\n");
-               if (Wnd->style & WS_MAXIMIZE)
-               {
-                  Wnd->InternalPos.flags |= WPF_RESTORETOMAXIMIZED;
-               }
-               else
-               {
-                  Wnd->InternalPos.flags &= ~WPF_RESTORETOMAXIMIZED;
-               }
-
-               old_style = IntSetStyle( Wnd, WS_MINIMIZE, WS_MAXIMIZE );
-
-               co_UserRedrawWindow(Wnd, NULL, 0, RDW_VALIDATE | RDW_NOERASE | RDW_NOINTERNALPAINT);
-
-               if (!(Wnd->InternalPos.flags & WPF_SETMINPOSITION))
-                  Wnd->InternalPos.flags &= ~WPF_MININIT;
-
-               WinPosFindIconPos(Wnd, &wpl.ptMinPosition);
-
-               /*if (!(old_style & WS_MINIMIZE))
-               {
-                  SwpFlags |= SWP_STATECHANGED;
-                  IntShowOwnedPopups(Wnd, FALSE);
-               }*/
-
-               RECTL_vSetRect(NewPos, wpl.ptMinPosition.x, wpl.ptMinPosition.y,
-                             wpl.ptMinPosition.x + UserGetSystemMetrics(SM_CXMINIMIZED),
-                             wpl.ptMinPosition.y + UserGetSystemMetrics(SM_CYMINIMIZED));
-               SwpFlags |= SWP_NOCOPYBITS;
-               break;
-            }
-
-         case SW_MAXIMIZE:
-            {
-               //ERR("MinMaximize Maximize\n");
-               if ((Wnd->style & WS_MAXIMIZE) && (Wnd->style & WS_VISIBLE))
-               {
-                  SwpFlags = SWP_NOSIZE | SWP_NOMOVE;
-                  break;
-               }
-               co_WinPosGetMinMaxInfo(Wnd, &Size, &wpl.ptMaxPosition, NULL, NULL);
-
-               /*ERR("Maximize: %d,%d %dx%d\n",
-                      wpl.ptMaxPosition.x, wpl.ptMaxPosition.y, Size.x, Size.y);
-                */
-               old_style = IntSetStyle( Wnd, WS_MAXIMIZE, WS_MINIMIZE );
-               /*if (old_style & WS_MINIMIZE)
-               {
-                  IntShowOwnedPopups(Wnd, TRUE);
-               }*/
-
-               if (!(old_style & WS_MAXIMIZE)) SwpFlags |= SWP_STATECHANGED;
-               RECTL_vSetRect(NewPos, wpl.ptMaxPosition.x, wpl.ptMaxPosition.y,
-                              //wpl.ptMaxPosition.x + Size.x, wpl.ptMaxPosition.y + Size.y);
-                              Size.x, Size.y);
-               break;
-            }
-
-         case SW_SHOWNOACTIVATE:
-            Wnd->InternalPos.flags &= ~WPF_RESTORETOMAXIMIZED;
-            /* fall through */
-         case SW_SHOWNORMAL:
-         case SW_RESTORE:
-         case SW_SHOWDEFAULT: /* FIXME: should have its own handler */
-            {
-               //ERR("MinMaximize Restore\n");
-               old_style = IntSetStyle( Wnd, 0, WS_MINIMIZE | WS_MAXIMIZE );
-               if (old_style & WS_MINIMIZE)
-               {
-                  //IntShowOwnedPopups(Wnd, TRUE);
-
-                  if (Wnd->InternalPos.flags & WPF_RESTORETOMAXIMIZED)
-                  {
-                     co_WinPosGetMinMaxInfo(Wnd, &Size, &wpl.ptMaxPosition, NULL, NULL);
-                     IntSetStyle( Wnd, WS_MAXIMIZE, 0 );
-                     SwpFlags |= SWP_STATECHANGED;
-                     RECTL_vSetRect(NewPos, wpl.ptMaxPosition.x, wpl.ptMaxPosition.y,
-                                    wpl.ptMaxPosition.x + Size.x, wpl.ptMaxPosition.y + Size.y);
-                     break;
-                  }
-                  else
-                  {
-                     *NewPos = wpl.rcNormalPosition;
-                     NewPos->right -= NewPos->left;
-                     NewPos->bottom -= NewPos->top;
-                     break;
-                  }
-               }
-               else
-               {
-                  if (!(old_style & WS_MAXIMIZE))
-                  {
-                     break;
-                  }
-                  SwpFlags |= SWP_STATECHANGED;
-                  Wnd->InternalPos.flags &= ~WPF_RESTORETOMAXIMIZED;
-                  *NewPos = wpl.rcNormalPosition;
-                  NewPos->right -= NewPos->left;
-                  NewPos->bottom -= NewPos->top;
-                  break;
-               }
-            }
-      }
-   return SwpFlags;
 }
 
 BOOL
@@ -1972,7 +1825,7 @@ co_WinPosSetWindowPos(
                            0,
                            RDW_VALIDATE | RDW_NOFRAME | RDW_NOERASE | RDW_NOINTERNALPAINT | RDW_ALLCHILDREN);
 
-      if (Window->spwndParent == UserGetDesktopWindow())
+      if (UserIsDesktopWindow(Window->spwndParent))
          co_IntShellHookNotify(HSHELL_WINDOWDESTROYED, (WPARAM)Window->head.h, 0);
 
       Window->style &= ~WS_VISIBLE; //IntSetStyle( Window, 0, WS_VISIBLE );
@@ -1981,7 +1834,7 @@ co_WinPosSetWindowPos(
    }
    else if (WinPos.flags & SWP_SHOWWINDOW)
    {
-       if (Window->spwndParent == UserGetDesktopWindow() &&
+       if (UserIsDesktopWindow(Window->spwndParent) &&
            Window->spwndOwner == NULL &&
            (!(Window->ExStyle & WS_EX_TOOLWINDOW) ||
             (Window->ExStyle & WS_EX_APPWINDOW)))
@@ -2051,7 +1904,7 @@ co_WinPosSetWindowPos(
             REGION_Delete(VisBeforeJustClient);
          }
 
-         /* No use in copying bits which are in the update region. */
+         /* Now use in copying bits which are in the update region. */
          if (Window->hrgnUpdate != NULL)
          {
             PREGION RgnUpdate = REGION_LockRgn(Window->hrgnUpdate);
@@ -2330,7 +2183,7 @@ co_WinPosSendSizeMove(PWND Wnd)
 
     co_IntSendMessageNoWait(UserHMGetHandle(Wnd), WM_SIZE, wParam, lParam);
 
-    if (Wnd->spwndParent == UserGetDesktopWindow()) // Wnd->spwndParent->fnid == FNID_DESKTOP )
+    if (UserIsDesktopWindow(Wnd->spwndParent))
        lParam = MAKELONG(Wnd->rcClient.left, Wnd->rcClient.top);
     else
        lParam = MAKELONG(Wnd->rcClient.left-Wnd->spwndParent->rcClient.left, Wnd->rcClient.top-Wnd->spwndParent->rcClient.top);
@@ -2338,6 +2191,153 @@ co_WinPosSendSizeMove(PWND Wnd)
     co_IntSendMessageNoWait(UserHMGetHandle(Wnd), WM_MOVE, 0, lParam);
 
     IntEngWindowChanged(Wnd, WOC_RGN_CLIENT);
+}
+
+UINT FASTCALL
+co_WinPosMinMaximize(PWND Wnd, UINT ShowFlag, RECT* NewPos)
+{
+   POINT Size;
+   WINDOWPLACEMENT wpl;
+   LONG old_style;
+   UINT SwpFlags = 0;
+
+   ASSERT_REFS_CO(Wnd);
+
+   wpl.length = sizeof(wpl);
+   IntGetWindowPlacement( Wnd, &wpl );
+
+   if (co_HOOK_CallHooks( WH_CBT, HCBT_MINMAX, (WPARAM)Wnd->head.h, ShowFlag))
+   {
+      ERR("WinPosMinMaximize WH_CBT Call Hook return!\n");
+      return SWP_NOSIZE | SWP_NOMOVE;
+   }
+      if (Wnd->style & WS_MINIMIZE)
+      {
+         switch (ShowFlag)
+         {
+         case SW_MINIMIZE:
+         case SW_SHOWMINNOACTIVE:
+         case SW_SHOWMINIMIZED:
+         case SW_FORCEMINIMIZE:
+             return SWP_NOSIZE | SWP_NOMOVE;
+         }
+         if (!co_IntSendMessageNoWait(Wnd->head.h, WM_QUERYOPEN, 0, 0))
+         {
+            return(SWP_NOSIZE | SWP_NOMOVE);
+         }
+         SwpFlags |= SWP_NOCOPYBITS;
+      }
+      switch (ShowFlag)
+      {
+         case SW_MINIMIZE:
+         case SW_SHOWMINNOACTIVE:
+         case SW_SHOWMINIMIZED:
+         case SW_FORCEMINIMIZE:
+            {
+               //ERR("MinMaximize Minimize\n");
+               if (Wnd->style & WS_MAXIMIZE)
+               {
+                  Wnd->InternalPos.flags |= WPF_RESTORETOMAXIMIZED;
+               }
+               else
+               {
+                  Wnd->InternalPos.flags &= ~WPF_RESTORETOMAXIMIZED;
+               }
+
+               old_style = IntSetStyle( Wnd, WS_MINIMIZE, WS_MAXIMIZE );
+
+               co_UserRedrawWindow(Wnd, NULL, 0, RDW_VALIDATE | RDW_NOERASE | RDW_NOINTERNALPAINT);
+
+               if (!(Wnd->InternalPos.flags & WPF_SETMINPOSITION))
+                  Wnd->InternalPos.flags &= ~WPF_MININIT;
+
+               WinPosFindIconPos(Wnd, &wpl.ptMinPosition);
+
+               /*if (!(old_style & WS_MINIMIZE))
+               {
+                  SwpFlags |= SWP_STATECHANGED;
+                  IntShowOwnedPopups(Wnd, FALSE);
+               }*/
+
+               RECTL_vSetRect(NewPos, wpl.ptMinPosition.x, wpl.ptMinPosition.y,
+                             wpl.ptMinPosition.x + UserGetSystemMetrics(SM_CXMINIMIZED),
+                             wpl.ptMinPosition.y + UserGetSystemMetrics(SM_CYMINIMIZED));
+               SwpFlags |= SWP_NOCOPYBITS;
+               break;
+            }
+
+         case SW_MAXIMIZE:
+            {
+               //ERR("MinMaximize Maximize\n");
+               if ((Wnd->style & WS_MAXIMIZE) && (Wnd->style & WS_VISIBLE))
+               {
+                  SwpFlags = SWP_NOSIZE | SWP_NOMOVE;
+                  break;
+               }
+               co_WinPosGetMinMaxInfo(Wnd, &Size, &wpl.ptMaxPosition, NULL, NULL);
+
+               /*ERR("Maximize: %d,%d %dx%d\n",
+                      wpl.ptMaxPosition.x, wpl.ptMaxPosition.y, Size.x, Size.y);
+                */
+               old_style = IntSetStyle( Wnd, WS_MAXIMIZE, WS_MINIMIZE );
+               /*if (old_style & WS_MINIMIZE)
+               {
+                  IntShowOwnedPopups(Wnd, TRUE);
+               }*/
+
+               if (!(old_style & WS_MAXIMIZE)) SwpFlags |= SWP_STATECHANGED;
+               RECTL_vSetRect(NewPos, wpl.ptMaxPosition.x, wpl.ptMaxPosition.y,
+                              //wpl.ptMaxPosition.x + Size.x, wpl.ptMaxPosition.y + Size.y);
+                              Size.x, Size.y);
+               break;
+            }
+
+         case SW_SHOWNOACTIVATE:
+            Wnd->InternalPos.flags &= ~WPF_RESTORETOMAXIMIZED;
+            /* fall through */
+         case SW_SHOWNORMAL:
+         case SW_RESTORE:
+         case SW_SHOWDEFAULT: /* FIXME: should have its own handler */
+            {
+               //ERR("MinMaximize Restore\n");
+               old_style = IntSetStyle( Wnd, 0, WS_MINIMIZE | WS_MAXIMIZE );
+               if (old_style & WS_MINIMIZE)
+               {
+                  //IntShowOwnedPopups(Wnd, TRUE);
+
+                  if (Wnd->InternalPos.flags & WPF_RESTORETOMAXIMIZED)
+                  {
+                     co_WinPosGetMinMaxInfo(Wnd, &Size, &wpl.ptMaxPosition, NULL, NULL);
+                     IntSetStyle( Wnd, WS_MAXIMIZE, 0 );
+                     SwpFlags |= SWP_STATECHANGED;
+                     RECTL_vSetRect(NewPos, wpl.ptMaxPosition.x, wpl.ptMaxPosition.y,
+                                    wpl.ptMaxPosition.x + Size.x, wpl.ptMaxPosition.y + Size.y);
+                     break;
+                  }
+                  else
+                  {
+                     *NewPos = wpl.rcNormalPosition;
+                     NewPos->right -= NewPos->left;
+                     NewPos->bottom -= NewPos->top;
+                     break;
+                  }
+               }
+               else
+               {
+                  if (!(old_style & WS_MAXIMIZE))
+                  {
+                     break;
+                  }
+                  SwpFlags |= SWP_STATECHANGED;
+                  Wnd->InternalPos.flags &= ~WPF_RESTORETOMAXIMIZED;
+                  *NewPos = wpl.rcNormalPosition;
+                  NewPos->right -= NewPos->left;
+                  NewPos->bottom -= NewPos->top;
+                  break;
+               }
+            }
+      }
+   return SwpFlags;
 }
 
 /*
@@ -2582,7 +2582,7 @@ co_WinPosShowWindow(PWND Wnd, INT Cmd)
    {
       if ( Wnd == pti->MessageQueue->spwndActive && pti->MessageQueue == IntGetFocusMessageQueue()  )
       {
-          if ( Wnd->spwndParent == UserGetDesktopWindow())
+          if (UserIsDesktopWindow(Wnd->spwndParent))
           {
               if (!ActivateOtherWindowMin(Wnd))
               {
@@ -2599,7 +2599,8 @@ co_WinPosShowWindow(PWND Wnd, INT Cmd)
       if (Wnd == pti->MessageQueue->spwndFocus)
       {
          Parent = Wnd->spwndParent;
-         if (Wnd->spwndParent == UserGetDesktopWindow()) Parent = 0;
+         if (UserIsDesktopWindow(Wnd->spwndParent))
+             Parent = 0;
          co_UserSetFocus(Parent);
       }
       // Hide, just return.
@@ -2753,7 +2754,7 @@ IntRealChildWindowFromPoint(PWND Parent, LONG x, LONG y)
    Pt.x = x;
    Pt.y = y;
 
-   if (Parent != UserGetDesktopWindow())
+   if (!UserIsDesktopWindow(Parent))
    {
       Pt.x += Parent->rcClient.left;
       Pt.y += Parent->rcClient.top;
@@ -2795,7 +2796,7 @@ IntChildWindowFromPointEx(PWND Parent, LONG x, LONG y, UINT uiFlags)
    Pt.x = x;
    Pt.y = y;
 
-   if (Parent != UserGetDesktopWindow())
+   if (!UserIsDesktopWindow(Parent))
    {
       if (Parent->ExStyle & WS_EX_LAYOUTRTL)
          Pt.x = Parent->rcClient.right - Pt.x;
@@ -3059,9 +3060,7 @@ NtUserDeferWindowPos(HDWP WinPosInfo,
    }
 
    pWnd = UserGetWindowObject(Wnd);
-   if ( !pWnd ||                           // FIXME:
-         pWnd == UserGetDesktopWindow() || // pWnd->fnid == FNID_DESKTOP
-         pWnd == UserGetMessageWindow() )  // pWnd->fnid == FNID_MESSAGEWND
+   if (!pWnd || UserIsDesktopWindow(pWnd) || UserIsMessageWindow(pWnd))
    {
       goto Exit;
    }
@@ -3072,9 +3071,7 @@ NtUserDeferWindowPos(HDWP WinPosInfo,
         WndInsertAfter != HWND_NOTOPMOST )
    {
       pWndIA = UserGetWindowObject(WndInsertAfter);
-      if ( !pWndIA ||
-            pWndIA == UserGetDesktopWindow() ||
-            pWndIA == UserGetMessageWindow() )
+      if (!pWndIA || UserIsDesktopWindow(pWndIA) || UserIsMessageWindow(pWndIA))
       {
          goto Exit;
       }
@@ -3221,9 +3218,7 @@ NtUserMinMaximize(
   UserEnterExclusive();
 
   pWnd = UserGetWindowObject(hWnd);
-  if ( !pWnd ||                           // FIXME:
-        pWnd == UserGetDesktopWindow() || // pWnd->fnid == FNID_DESKTOP
-        pWnd == UserGetMessageWindow() )  // pWnd->fnid == FNID_MESSAGEWND
+  if (!pWnd || UserIsDesktopWindow(pWnd) || UserIsMessageWindow(pWnd))
   {
      goto Exit;
   }
@@ -3302,9 +3297,8 @@ NtUserSetWindowPos(
    TRACE("Enter NtUserSetWindowPos\n");
    UserEnterExclusive();
 
-   if (!(Window = UserGetWindowObject(hWnd)) || // FIXME:
-         Window == UserGetDesktopWindow() ||    // pWnd->fnid == FNID_DESKTOP
-         Window == UserGetMessageWindow() )     // pWnd->fnid == FNID_MESSAGEWND
+   if (!(Window = UserGetWindowObject(hWnd)) ||
+        UserIsDesktopWindow(Window) || UserIsMessageWindow(Window))
    {
       ERR("NtUserSetWindowPos bad window handle!\n");
       RETURN(FALSE);
@@ -3316,8 +3310,7 @@ NtUserSetWindowPos(
         hWndInsertAfter != HWND_NOTOPMOST )
    {
       if (!(pWndIA = UserGetWindowObject(hWndInsertAfter)) ||
-            pWndIA == UserGetDesktopWindow() ||
-            pWndIA == UserGetMessageWindow() )
+            UserIsDesktopWindow(pWndIA) || UserIsMessageWindow(pWndIA))
       {
          ERR("NtUserSetWindowPos bad insert window handle!\n");
          RETURN(FALSE);
@@ -3370,9 +3363,8 @@ NtUserSetWindowRgn(
    TRACE("Enter NtUserSetWindowRgn\n");
    UserEnterExclusive();
 
-   if (!(Window = UserGetWindowObject(hWnd)) || // FIXME:
-         Window == UserGetDesktopWindow() ||    // pWnd->fnid == FNID_DESKTOP
-         Window == UserGetMessageWindow() )     // pWnd->fnid == FNID_MESSAGEWND
+   if (!(Window = UserGetWindowObject(hWnd)) ||
+        UserIsDesktopWindow(Window) || UserIsMessageWindow(Window))
    {
       RETURN( 0);
    }
@@ -3432,8 +3424,7 @@ NtUserSetInternalWindowPos(
    UserEnterExclusive();
 
    if (!(Wnd = UserGetWindowObject(hwnd)) || // FIXME:
-         Wnd == UserGetDesktopWindow() ||    // pWnd->fnid == FNID_DESKTOP
-         Wnd == UserGetMessageWindow() )     // pWnd->fnid == FNID_MESSAGEWND
+        UserIsDesktopWindow(Wnd) || UserIsMessageWindow(Wnd))
    {
       RETURN( FALSE);
    }
@@ -3501,9 +3492,8 @@ NtUserSetWindowPlacement(HWND hWnd,
    TRACE("Enter NtUserSetWindowPlacement\n");
    UserEnterExclusive();
 
-   if (!(Wnd = UserGetWindowObject(hWnd)) || // FIXME:
-        Wnd == UserGetDesktopWindow() ||     // pWnd->fnid == FNID_DESKTOP
-        Wnd == UserGetMessageWindow() )      // pWnd->fnid == FNID_MESSAGEWND
+   if (!(Wnd = UserGetWindowObject(hWnd)) ||
+        UserIsDesktopWindow(Wnd) || UserIsMessageWindow(Wnd))
    {
       RETURN( FALSE);
    }
@@ -3552,9 +3542,8 @@ NtUserShowWindowAsync(HWND hWnd, LONG nCmdShow)
    TRACE("Enter NtUserShowWindowAsync\n");
    UserEnterExclusive();
 
-   if (!(Window = UserGetWindowObject(hWnd)) || // FIXME:
-         Window == UserGetDesktopWindow() ||    // pWnd->fnid == FNID_DESKTOP
-         Window == UserGetMessageWindow() )     // pWnd->fnid == FNID_MESSAGEWND
+   if (!(Window = UserGetWindowObject(hWnd)) ||
+        UserIsDesktopWindow(Window) || UserIsMessageWindow(Window))
    {
       RETURN(FALSE);
    }
@@ -3592,9 +3581,8 @@ NtUserShowWindow(HWND hWnd, LONG nCmdShow)
    TRACE("Enter NtUserShowWindow hWnd %p SW_ %d\n",hWnd, nCmdShow);
    UserEnterExclusive();
 
-   if (!(Window = UserGetWindowObject(hWnd)) || // FIXME:
-         Window == UserGetDesktopWindow() ||    // pWnd->fnid == FNID_DESKTOP
-         Window == UserGetMessageWindow() )     // pWnd->fnid == FNID_MESSAGEWND
+   if (!(Window = UserGetWindowObject(hWnd)) ||
+        UserIsDesktopWindow(Window) || UserIsMessageWindow(Window))
    {
       RETURN(FALSE);
    }

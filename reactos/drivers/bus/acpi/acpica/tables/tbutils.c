@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2017, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -273,7 +273,7 @@ AcpiTbGetRootTableEntry (
  *
  ******************************************************************************/
 
-ACPI_STATUS
+ACPI_STATUS ACPI_INIT_FUNCTION
 AcpiTbParseRootTable (
     ACPI_PHYSICAL_ADDRESS   RsdpAddress)
 {
@@ -415,32 +415,95 @@ NextTable:
 
 /*******************************************************************************
  *
- * FUNCTION:    AcpiIsValidSignature
+ * FUNCTION:    AcpiTbGetTable
  *
- * PARAMETERS:  Signature           - Sig string to be validated
+ * PARAMETERS:  TableDesc           - Table descriptor
+ *              OutTable            - Where the pointer to the table is returned
  *
- * RETURN:      TRUE if signature is has 4 valid ACPI characters
+ * RETURN:      Status and pointer to the requested table
  *
- * DESCRIPTION: Validate an ACPI table signature.
+ * DESCRIPTION: Increase a reference to a table descriptor and return the
+ *              validated table pointer.
+ *              If the table descriptor is an entry of the root table list,
+ *              this API must be invoked with ACPI_MTX_TABLES acquired.
  *
  ******************************************************************************/
 
-BOOLEAN
-AcpiIsValidSignature (
-    char                    *Signature)
+ACPI_STATUS
+AcpiTbGetTable (
+    ACPI_TABLE_DESC        *TableDesc,
+    ACPI_TABLE_HEADER      **OutTable)
 {
-    UINT32                  i;
+    ACPI_STATUS            Status;
 
 
-    /* Validate each character in the signature */
+    ACPI_FUNCTION_TRACE (AcpiTbGetTable);
 
-    for (i = 0; i < ACPI_NAME_SIZE; i++)
+
+    if (TableDesc->ValidationCount == 0)
     {
-        if (!AcpiUtValidAcpiChar (Signature[i], i))
+        /* Table need to be "VALIDATED" */
+
+        Status = AcpiTbValidateTable (TableDesc);
+        if (ACPI_FAILURE (Status))
         {
-            return (FALSE);
+            return_ACPI_STATUS (Status);
         }
     }
 
-    return (TRUE);
+    TableDesc->ValidationCount++;
+    if (TableDesc->ValidationCount == 0)
+    {
+        ACPI_ERROR ((AE_INFO,
+            "Table %p, Validation count is zero after increment\n",
+            TableDesc));
+        TableDesc->ValidationCount--;
+        return_ACPI_STATUS (AE_LIMIT);
+    }
+
+    *OutTable = TableDesc->Pointer;
+    return_ACPI_STATUS (AE_OK);
+}
+
+
+/*******************************************************************************
+ *
+ * FUNCTION:    AcpiTbPutTable
+ *
+ * PARAMETERS:  TableDesc           - Table descriptor
+ *
+ * RETURN:      None
+ *
+ * DESCRIPTION: Decrease a reference to a table descriptor and release the
+ *              validated table pointer if no references.
+ *              If the table descriptor is an entry of the root table list,
+ *              this API must be invoked with ACPI_MTX_TABLES acquired.
+ *
+ ******************************************************************************/
+
+void
+AcpiTbPutTable (
+    ACPI_TABLE_DESC        *TableDesc)
+{
+
+    ACPI_FUNCTION_TRACE (AcpiTbPutTable);
+
+
+    if (TableDesc->ValidationCount == 0)
+    {
+        ACPI_WARNING ((AE_INFO,
+            "Table %p, Validation count is zero before decrement\n",
+            TableDesc));
+        return_VOID;
+    }
+    TableDesc->ValidationCount--;
+
+    if (TableDesc->ValidationCount == 0)
+    {
+        /* Table need to be "INVALIDATED" */
+
+        AcpiTbInvalidateTable (TableDesc);
+    }
+
+    return_VOID;
 }

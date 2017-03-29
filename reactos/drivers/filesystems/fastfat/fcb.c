@@ -136,11 +136,8 @@ vfatNewFCB(
     }
     RtlZeroMemory(rcFCB, sizeof(VFATFCB));
     vfatInitFcb(rcFCB, pFileNameU);
-    if (pVCB->Flags & VCB_IS_FATX)
-    {
-        rcFCB->Flags |= FCB_IS_FATX_ENTRY;
+    if (vfatVolumeIsFatX(pVCB))
         rcFCB->Attributes = &rcFCB->entry.FatX.Attrib;
-    }
     else
         rcFCB->Attributes = &rcFCB->entry.Fat.Attrib;
     rcFCB->Hash.Hash = vfatNameHash(0, &rcFCB->PathNameU);
@@ -276,15 +273,8 @@ vfatDestroyFCB(
     ExFreePool(pFCB->PathNameBuffer);
     ExDeleteResourceLite(&pFCB->PagingIoResource);
     ExDeleteResourceLite(&pFCB->MainResource);
-    ExFreeToNPagedLookasideList(&VfatGlobalData->FcbLookasideList, pFCB);
     ASSERT(IsListEmpty(&pFCB->ParentListHead));
-}
-
-BOOLEAN
-vfatFCBIsDirectory(
-    PVFATFCB FCB)
-{
-    return ((*FCB->Attributes & FILE_ATTRIBUTE_DIRECTORY) == FILE_ATTRIBUTE_DIRECTORY);
+    ExFreeToNPagedLookasideList(&VfatGlobalData->FcbLookasideList, pFCB);
 }
 
 BOOLEAN
@@ -378,7 +368,7 @@ vfatInitFCBFromDirEntry(
     RtlCopyMemory(&Fcb->entry, &DirContext->DirEntry, sizeof (DIR_ENTRY));
     RtlCopyUnicodeString(&Fcb->ShortNameU, &DirContext->ShortNameU);
     Fcb->Hash.Hash = vfatNameHash(0, &Fcb->PathNameU);
-    if (Vcb->Flags & VCB_IS_FATX)
+    if (vfatVolumeIsFatX(Vcb))
     {
         Fcb->ShortHash.Hash = Fcb->Hash.Hash;
     }
@@ -408,7 +398,7 @@ vfatInitFCBFromDirEntry(
             }
         }
     }
-    else if (Fcb->Flags & FCB_IS_FATX_ENTRY)
+    else if (vfatVolumeIsFatX(Vcb))
     {
         Size = Fcb->entry.FatX.FileSize;
     }
@@ -418,7 +408,7 @@ vfatInitFCBFromDirEntry(
     }
     Fcb->dirIndex = DirContext->DirIndex;
     Fcb->startIndex = DirContext->StartIndex;
-    if ((Fcb->Flags & FCB_IS_FATX_ENTRY) && !vfatFCBIsRoot(Fcb))
+    if (vfatVolumeIsFatX(Vcb) && !vfatFCBIsRoot(Fcb))
     {
         ASSERT(DirContext->DirIndex >= 2 && DirContext->StartIndex >= 2);
         Fcb->dirIndex = DirContext->DirIndex-2;
@@ -460,7 +450,7 @@ vfatSetFCBNewDirName(
     Fcb->DirNameU.Buffer = Fcb->PathNameU.Buffer;
     vfatSplitPathName(&Fcb->PathNameU, &Fcb->DirNameU, &Fcb->LongNameU);
     Fcb->Hash.Hash = vfatNameHash(0, &Fcb->PathNameU);
-    if (pVCB->Flags & VCB_IS_FATX)
+    if (vfatVolumeIsFatX(pVCB))
     {
         Fcb->ShortHash.Hash = Fcb->Hash.Hash;
     }
@@ -644,7 +634,7 @@ vfatMakeRootFCB(
     UNICODE_STRING NameU = RTL_CONSTANT_STRING(L"\\");
 
     FCB = vfatNewFCB(pVCB, &NameU);
-    if (FCB->Flags & FCB_IS_FATX_ENTRY)
+    if (vfatVolumeIsFatX(pVCB))
     {
         memset(FCB->entry.FatX.Filename, ' ', 42);
         FCB->entry.FatX.FileSize = pVCB->FatInfo.rootDirectorySectors * pVCB->FatInfo.BytesPerSector;
@@ -728,14 +718,20 @@ vfatMakeFCBFromDirEntry(
     rcFCB->RefCount = 1;
     if (vfatFCBIsDirectory(rcFCB))
     {
-        vfatFCBInitializeCacheFromVolume(vcb, rcFCB);
+        Status = vfatFCBInitializeCacheFromVolume(vcb, rcFCB);
+        if (!NT_SUCCESS(Status))
+        {
+            vfatReleaseFCB(vcb, rcFCB);
+            ExFreePoolWithTag(NameU.Buffer, TAG_FCB);
+            return Status;
+        }
     }
     rcFCB->parentFcb = directoryFCB;
     InsertTailList(&directoryFCB->ParentListHead, &rcFCB->ParentListEntry);
     vfatAddFCBToTable(vcb, rcFCB);
     *fileFCB = rcFCB;
 
-    ExFreePool(NameU.Buffer);
+    ExFreePoolWithTag(NameU.Buffer, TAG_FCB);
     return STATUS_SUCCESS;
 }
 
@@ -782,6 +778,7 @@ vfatDirFindFile(
     WCHAR ShortNameBuffer[13];
     BOOLEAN FoundLong = FALSE;
     BOOLEAN FoundShort = FALSE;
+    BOOLEAN IsFatX = vfatVolumeIsFatX(pDeviceExt);
 
     ASSERT(pDeviceExt);
     ASSERT(pDirectoryFCB);
@@ -801,7 +798,8 @@ vfatDirFindFile(
 
     while (TRUE)
     {
-        status = pDeviceExt->GetNextDirEntry(&Context,
+        status = VfatGetNextDirEntry(pDeviceExt,
+            &Context,
             &Page,
             pDirectoryFCB,
             &DirContext,
@@ -819,7 +817,7 @@ vfatDirFindFile(
         DPRINT("  Index:%u  longName:%wZ\n",
                DirContext.DirIndex, &DirContext.LongNameU);
 
-        if (!ENTRY_VOLUME(pDeviceExt, &DirContext.DirEntry))
+        if (!ENTRY_VOLUME(IsFatX, &DirContext.DirEntry))
         {
             if (DirContext.LongNameU.Length == 0 ||
                 DirContext.ShortNameU.Length == 0)

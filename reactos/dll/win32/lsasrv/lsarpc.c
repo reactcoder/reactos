@@ -46,7 +46,7 @@ LsarStartRpcServer(VOID)
     TRACE("LsarStartRpcServer() called\n");
 
     Status = RpcServerUseProtseqEpW(L"ncacn_np",
-                                    10,
+                                    RPC_C_PROTSEQ_MAX_REQS_DEFAULT,
                                     L"\\pipe\\lsarpc",
                                     NULL);
     if (Status != RPC_S_OK)
@@ -1089,8 +1089,8 @@ NTSTATUS WINAPI LsarCreateTrustedDomain(
     ACCESS_MASK DesiredAccess,
     LSAPR_HANDLE *TrustedDomainHandle)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* FIXME: We are not running an AD yet */
+    return STATUS_DIRECTORY_SERVICE_REQUIRED;
 }
 
 
@@ -1101,8 +1101,10 @@ NTSTATUS WINAPI LsarEnumerateTrustedDomains(
     PLSAPR_TRUSTED_ENUM_BUFFER EnumerationBuffer,
     DWORD PreferedMaximumLength)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* FIXME: We are not running an AD yet */
+    EnumerationBuffer->EntriesRead = 0;
+    EnumerationBuffer->Information = NULL;
+    return STATUS_NO_MORE_ENTRIES;
 }
 
 
@@ -1624,7 +1626,7 @@ done:
 /* Function 20 */
 NTSTATUS WINAPI LsarRemovePrivilegesFromAccount(
     LSAPR_HANDLE AccountHandle,
-    BOOL AllPrivileges,
+    BOOLEAN AllPrivileges,
     PLSAPR_PRIVILEGE_SET Privileges)
 {
     PLSA_DB_OBJECT AccountObject;
@@ -3080,7 +3082,7 @@ done:
 NTSTATUS WINAPI LsarRemoveAccountRights(
     LSAPR_HANDLE PolicyHandle,
     PRPC_SID AccountSid,
-    BOOL AllRights,
+    BOOLEAN AllRights,
     PLSAPR_USER_RIGHT_SET UserRights)
 {
     PLSA_DB_OBJECT PolicyObject;
@@ -3277,8 +3279,8 @@ NTSTATUS WINAPI LsarQueryTrustedDomainInfo(
     TRUSTED_INFORMATION_CLASS InformationClass,
     PLSAPR_TRUSTED_DOMAIN_INFO *TrustedDomainInformation)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* FIXME: We are not running an AD yet */
+    return STATUS_DIRECTORY_SERVICE_REQUIRED;
 }
 
 
@@ -3289,8 +3291,8 @@ NTSTATUS WINAPI LsarSetTrustedDomainInfo(
     TRUSTED_INFORMATION_CLASS InformationClass,
     PLSAPR_TRUSTED_DOMAIN_INFO TrustedDomainInformation)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* FIXME: We are not running an AD yet */
+    return STATUS_DIRECTORY_SERVICE_REQUIRED;
 }
 
 
@@ -3299,8 +3301,8 @@ NTSTATUS WINAPI LsarDeleteTrustedDomain(
     LSAPR_HANDLE PolicyHandle,
     PRPC_SID TrustedDomainSid)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* FIXME: We are not running an AD yet */
+    return STATUS_DIRECTORY_SERVICE_REQUIRED;
 }
 
 
@@ -3617,8 +3619,8 @@ NTSTATUS WINAPI LsarQueryTrustedDomainInfoByName(
     POLICY_INFORMATION_CLASS InformationClass,
     PLSAPR_TRUSTED_DOMAIN_INFO *PolicyInformation)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* FIXME: We are not running an AD yet */
+    return STATUS_OBJECT_NAME_NOT_FOUND;
 }
 
 
@@ -3629,8 +3631,8 @@ NTSTATUS WINAPI LsarSetTrustedDomainInfoByName(
     POLICY_INFORMATION_CLASS InformationClass,
     PLSAPR_TRUSTED_DOMAIN_INFO PolicyInformation)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* FIXME: We are not running an AD yet */
+    return STATUS_OBJECT_NAME_NOT_FOUND;
 }
 
 
@@ -3641,8 +3643,10 @@ NTSTATUS WINAPI LsarEnumerateTrustedDomainsEx(
     PLSAPR_TRUSTED_ENUM_BUFFER_EX EnumerationBuffer,
     DWORD PreferedMaximumLength)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* FIXME: We are not running an AD yet */
+    EnumerationBuffer->EntriesRead = 0;
+    EnumerationBuffer->EnumerationBuffer = NULL;
+    return STATUS_NO_MORE_ENTRIES;
 }
 
 
@@ -3654,8 +3658,8 @@ NTSTATUS WINAPI LsarCreateTrustedDomainEx(
     ACCESS_MASK DesiredAccess,
     LSAPR_HANDLE *TrustedDomainHandle)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* FIXME: We are not running an AD yet */
+    return STATUS_DIRECTORY_SERVICE_REQUIRED;
 }
 
 
@@ -3697,8 +3701,8 @@ NTSTATUS WINAPI LsarOpenTrustedDomainByName(
     ACCESS_MASK DesiredAccess,
     LSAPR_HANDLE *TrustedDomainHandle)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* FIXME: We are not running an AD yet */
+    return STATUS_OBJECT_NAME_NOT_FOUND;
 }
 
 
@@ -3819,8 +3823,8 @@ NTSTATUS WINAPI LsarCreateTrustedDomainEx2(
     ACCESS_MASK DesiredAccess,
     LSAPR_HANDLE *TrustedDomainHandle)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* FIXME: We are not running an AD yet */
+    return STATUS_DIRECTORY_SERVICE_REQUIRED;
 }
 
 
@@ -3988,7 +3992,7 @@ NTSTATUS WINAPI LsarSetForestTrustInformation(
     PLSA_UNICODE_STRING TrustedDomainName,
     LSA_FOREST_TRUST_RECORD_TYPE HighestRecordType,
     PLSA_FOREST_TRUST_INFORMATION ForestTrustInfo,
-    BOOL CheckOnly,
+    BOOLEAN CheckOnly,
     PLSA_FOREST_TRUST_COLLISION_INFORMATION *CollisionInfo)
 {
     UNIMPLEMENTED;

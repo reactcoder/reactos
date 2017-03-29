@@ -1018,7 +1018,9 @@ USBSTOR_AllocateIrp(
     //
     // create scsi block
     //
-    Request = (PSCSI_REQUEST_BLOCK)ExAllocatePool(NonPagedPool, sizeof(SCSI_REQUEST_BLOCK));
+    Request = ExAllocatePoolWithTag(NonPagedPool,
+                                    sizeof(SCSI_REQUEST_BLOCK),
+                                    USB_STOR_TAG);
     if (!Request)
     {
         //
@@ -1036,14 +1038,16 @@ USBSTOR_AllocateIrp(
     //
     // allocate data transfer block
     //
-    Request->DataBuffer = ExAllocatePool(NonPagedPool, DataTransferLength);
-    if (!Request)
+    Request->DataBuffer = ExAllocatePoolWithTag(NonPagedPool,
+                                                DataTransferLength,
+                                                USB_STOR_TAG);
+    if (!Request->DataBuffer)
     {
         //
         // no memory
         //
         IoFreeIrp(Irp);
-        ExFreePool(Request);
+        ExFreePoolWithTag(Request, USB_STOR_TAG);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -1057,7 +1061,8 @@ USBSTOR_AllocateIrp(
         // no memory
         //
         IoFreeIrp(Irp);
-        ExFreePool(Request);
+        ExFreePoolWithTag(Request->DataBuffer, USB_STOR_TAG);
+        ExFreePoolWithTag(Request, USB_STOR_TAG);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -1169,7 +1174,8 @@ USBSTOR_SendIrp(
     //
     // free resources
     //
-    ExFreePool(Request);
+    ExFreePoolWithTag(Request->DataBuffer, USB_STOR_TAG);
+    ExFreePoolWithTag(Request, USB_STOR_TAG);
     IoFreeIrp(Irp);
     return Status;
 }
@@ -1255,7 +1261,7 @@ USBSTOR_SendFormatCapacityIrp(
     //
     // free response
     //
-    ExFreePool(Response);
+    ExFreePoolWithTag(Response, USB_STOR_TAG);
     return Status;
 }
 

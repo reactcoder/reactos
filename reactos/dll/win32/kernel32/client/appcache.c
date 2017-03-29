@@ -97,8 +97,8 @@ IsShimInfrastructureDisabled(VOID)
                                                      KeyValuePartialInformation,
                                                      &KeyInfo,
                                                      sizeof(KeyInfo),
-                                                     &ResultLength),
-                                                     NtClose(KeyHandle);
+                                                     &ResultLength);
+                            NtClose(KeyHandle);
                             if ((NT_SUCCESS(Status)) &&
                                 (KeyInfo.Type == REG_DWORD) &&
                                 (KeyInfo.DataLength == sizeof(ULONG)) &&
@@ -133,7 +133,8 @@ BaseCheckAppcompatCache(IN PWCHAR ApplicationName,
                         IN PWCHAR Environment,
                         OUT PULONG Reason)
 {
-    UNIMPLEMENTED;
+    DPRINT("BaseCheckAppcompatCache is UNIMPLEMENTED\n");
+
     if (Reason) *Reason = 0;
     return TRUE;
 }

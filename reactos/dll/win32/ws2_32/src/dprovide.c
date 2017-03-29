@@ -20,14 +20,15 @@ WSAAPI
 WsTpAllocate(VOID)
 {
     PTPROVIDER Provider;
-    
-    DPRINT("WsTpAllocate: WsSockHeap %d\n", WsSockHeap);
+
     /* Allocate the object */
     Provider = HeapAlloc(WsSockHeap, HEAP_ZERO_MEMORY, sizeof(*Provider));
+    if (Provider)
+    {
+        /* Setup non-zero data */
+        Provider->RefCount = 1;
+    }
 
-    /* Setup non-zero data */
-    Provider->RefCount = 1;
-    
     /* Return it */
     return Provider;
 }
@@ -44,10 +45,10 @@ WsTpInitialize(IN PTPROVIDER Provider,
     CHAR ExpandedDllPath[MAX_PATH];
     DWORD ErrorCode;
     DPRINT("WsTpInitialize: %p, %p, %p\n", Provider, DllName, ProtocolInfo);
-    
+
     /* Clear the tables */
-    RtlZeroMemory(&Provider->UpcallTable, sizeof(WSPUPCALLTABLE));
-    RtlZeroMemory(&Provider->Service.lpWSPAccept, sizeof(WSPPROC_TABLE));
+    RtlZeroMemory(&Provider->UpcallTable, sizeof(Provider->UpcallTable));
+    RtlZeroMemory(&Provider->Service, sizeof(Provider->Service));
 
     /* Set up the Upcall Table */
     Provider->UpcallTable.lpWPUCloseEvent = WPUCloseEvent;
@@ -72,14 +73,14 @@ WsTpInitialize(IN PTPROVIDER Provider,
     /* Load the DLL */
     Provider->DllHandle = LoadLibrary(ExpandedDllPath);
 
-    if(!Provider->DllHandle)
+    if (!Provider->DllHandle)
     {
         return SOCKET_ERROR;
     }
     /* Get the pointer to WSPStartup */
     WSPStartupProc = (LPWSPSTARTUP)GetProcAddress(Provider->DllHandle, "WSPStartup");
 
-    if(!WSPStartupProc)
+    if (!WSPStartupProc)
     {
         return SOCKET_ERROR;
     }
@@ -88,7 +89,7 @@ WsTpInitialize(IN PTPROVIDER Provider,
                       &WspData,
                       ProtocolInfo,
                       Provider->UpcallTable,
-                      (LPWSPPROC_TABLE)&Provider->Service.lpWSPAccept);
+                      &Provider->Service);
 
     /* Return */
     return ErrorCode;
@@ -101,7 +102,7 @@ WsTpWSPCleanup(IN PTPROVIDER Provider,
 {
     LPWSPCLEANUP WSPCleanup = NULL;
     INT ErrorCode = ERROR_SUCCESS;
-    
+
     /* Make sure we have a loaded handle */
     if (Provider->DllHandle)
     {
@@ -121,7 +122,7 @@ WSAAPI
 WsTpDelete(IN PTPROVIDER Provider)
 {
     INT ErrorCode;
-    
+
     /* Make sure we have a loaded handle */
     if (Provider->DllHandle)
     {
@@ -130,10 +131,11 @@ WsTpDelete(IN PTPROVIDER Provider)
 
         /* Unload the library */
         FreeLibrary(Provider->DllHandle);
-
-        /* Clear the handle value */
         Provider->DllHandle = NULL;
     }
+
+    /* Delete us */
+    HeapFree(WsSockHeap, 0, Provider);
 }
 
 VOID

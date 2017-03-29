@@ -1935,6 +1935,27 @@ DrawPartitionList(
             LastLine++;
         }
 
+        if (CurrentPartLineFound == FALSE)
+        {
+            Entry2 = DiskEntry->LogicalPartListHead.Flink;
+            while (Entry2 != &DiskEntry->LogicalPartListHead)
+            {
+                PartEntry = CONTAINING_RECORD(Entry2, PARTENTRY, ListEntry);
+                if (PartEntry == List->CurrentPartition)
+                {
+                    CurrentPartLineFound = TRUE;
+                }
+
+                Entry2 = Entry2->Flink;
+                if (CurrentPartLineFound == FALSE)
+                {
+                    CurrentPartLine++;
+                }
+
+                LastLine++;
+            }
+        }
+
         if (DiskEntry == List->CurrentDisk)
         {
             CurrentDiskLineFound = TRUE;
@@ -3022,6 +3043,13 @@ DeleteCurrentPartition(
         List->CurrentPartition->IsPartitioned == FALSE)
     {
         return;
+    }
+
+    /* Clear the system disk and partition pointers if the system partition will be deleted */
+    if (List->SystemPartition == List->CurrentPartition)
+    {
+        List->SystemDisk = NULL;
+        List->SystemPartition = NULL;
     }
 
     DiskEntry = List->CurrentDisk;

@@ -3,8 +3,9 @@
  * LICENSE:         GPL - See COPYING in the top level directory
  * FILE:            win32ss/gdi/ntgdi/freetype.c
  * PURPOSE:         FreeType font engine interface
- * PROGRAMMER:      Copyright 2001 Huw D M Davies for CodeWeavers.
+ * PROGRAMMERS:     Copyright 2001 Huw D M Davies for CodeWeavers.
  *                  Copyright 2006 Dmitry Timoshkov for CodeWeavers.
+ *                  Copyright 2016-2017 Katayama Hirofumi MZ.
  */
 
 /** Includes ******************************************************************/
@@ -14,29 +15,80 @@
 #include FT_GLYPH_H
 #include FT_TYPE1_TABLES_H
 #include FT_TRUETYPE_TABLES_H
+#include FT_TRUETYPE_TAGS_H
 #include FT_TRIGONOMETRY_H
 #include FT_BITMAP_H
 #include FT_OUTLINE_H
 #include FT_WINFONTS_H
+#include FT_SFNT_NAMES_H
+#include FT_SYNTHESIS_H
+#include FT_TRUETYPE_IDS_H
+
+#ifndef FT_INTERNAL_INTERNAL_H
+    #define  FT_INTERNAL_INTERNAL_H  <freetype/internal/internal.h>
+    #include FT_INTERNAL_INTERNAL_H
+#endif
+#include FT_INTERNAL_TRUETYPE_TYPES_H
 
 #include <gdi/eng/floatobj.h>
 
 #define NDEBUG
 #include <debug.h>
 
-#ifndef FT_MAKE_TAG
-#define FT_MAKE_TAG( ch0, ch1, ch2, ch3 ) \
-       ( ((DWORD)(BYTE)(ch0) << 24) | ((DWORD)(BYTE)(ch1) << 16) | \
-       ((DWORD)(BYTE)(ch2) << 8) | (DWORD)(BYTE)(ch3) )
+/* TPMF_FIXED_PITCH is confusing; brain-dead api */
+#ifndef _TMPF_VARIABLE_PITCH
+    #define _TMPF_VARIABLE_PITCH    TMPF_FIXED_PITCH
 #endif
 
 extern const MATRIX gmxWorldToDeviceDefault;
 extern const MATRIX gmxWorldToPageDefault;
 
-// HACK!! Fix XFORMOBJ then use 1:16 / 16:1
+/* HACK!! Fix XFORMOBJ then use 1:16 / 16:1 */
 #define gmxWorldToDeviceDefault gmxWorldToPageDefault
 
 FT_Library  library;
+
+/* special font names */
+static const UNICODE_STRING MarlettW = RTL_CONSTANT_STRING(L"Marlett");
+static const UNICODE_STRING SystemW = RTL_CONSTANT_STRING(L"System");
+static const UNICODE_STRING FixedSysW = RTL_CONSTANT_STRING(L"FixedSys");
+
+/* registry */
+static UNICODE_STRING FontRegPath =
+    RTL_CONSTANT_STRING(L"\\REGISTRY\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Fonts");
+
+static PSHARED_FACE
+SharedFace_Create(FT_Face Face)
+{
+    PSHARED_FACE Ptr;
+    Ptr = ExAllocatePoolWithTag(PagedPool, sizeof(SHARED_FACE), TAG_FONT);
+    if (Ptr)
+    {
+        Ptr->Face = Face;
+        Ptr->RefCount = 1;
+    }
+    return Ptr;
+}
+
+static void
+SharedFace_AddRef(PSHARED_FACE Ptr)
+{
+    ++Ptr->RefCount;
+}
+
+static void
+SharedFace_Release(PSHARED_FACE Ptr)
+{
+    if (Ptr->RefCount <= 0)
+        return;
+
+    --Ptr->RefCount;
+    if (Ptr->RefCount == 0)
+    {
+        FT_Done_Face(Ptr->Face);
+        ExFreePoolWithTag(Ptr, TAG_FONT);
+    }
+}
 
 typedef struct _FONT_ENTRY
 {
@@ -149,6 +201,167 @@ static const CHARSETINFO FontTci[MAXTCIINDEX] =
     { SYMBOL_CHARSET, CP_SYMBOL, {{0,0,0,0},{FS_SYMBOL,0}} }
 };
 
+/*
+ * FONTSUBST_... --- constants for font substitutes
+ */
+#define FONTSUBST_FROM          0
+#define FONTSUBST_TO            1
+#define FONTSUBST_FROM_AND_TO   2
+
+/*
+ * FONTSUBST_ENTRY --- font substitute entry
+ */
+typedef struct FONTSUBST_ENTRY
+{
+    LIST_ENTRY      ListEntry;
+    UNICODE_STRING  FontNames[FONTSUBST_FROM_AND_TO];
+    BYTE            CharSets[FONTSUBST_FROM_AND_TO];
+} FONTSUBST_ENTRY, *PFONTSUBST_ENTRY;
+
+/* list head */
+static RTL_STATIC_LIST_HEAD(FontSubstListHead);
+
+/*
+ * IntLoadFontSubstList --- loads the list of font substitutes
+ */
+BOOL FASTCALL
+IntLoadFontSubstList(PLIST_ENTRY pHead)
+{
+    NTSTATUS                        Status;
+    HANDLE                          KeyHandle;
+    OBJECT_ATTRIBUTES               ObjectAttributes;
+    KEY_FULL_INFORMATION            KeyFullInfo;
+    ULONG                           i, Length;
+    UNICODE_STRING                  FromW, ToW;
+    BYTE                            InfoBuffer[128];
+    PKEY_VALUE_FULL_INFORMATION     pInfo;
+    BYTE                            CharSets[FONTSUBST_FROM_AND_TO];
+    LPWSTR                          pch;
+    PFONTSUBST_ENTRY                pEntry;
+
+    /* the FontSubstitutes registry key */
+    static UNICODE_STRING FontSubstKey =
+        RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\"
+                            L"Microsoft\\Windows NT\\CurrentVersion\\"
+                            L"FontSubstitutes");
+
+    /* open registry key */
+    InitializeObjectAttributes(&ObjectAttributes, &FontSubstKey,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL, NULL);
+    Status = ZwOpenKey(&KeyHandle, KEY_READ, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT("ZwOpenKey failed: 0x%08X\n", Status);
+        return FALSE;   /* failure */
+    }
+
+    /* query count of values */
+    Status = ZwQueryKey(KeyHandle, KeyFullInformation,
+                        &KeyFullInfo, sizeof(KeyFullInfo), &Length);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT("ZwQueryKey failed: 0x%08X\n", Status);
+        ZwClose(KeyHandle);
+        return FALSE;   /* failure */
+    }
+
+    /* for each value */
+    for (i = 0; i < KeyFullInfo.Values; ++i)
+    {
+        /* get value name */
+        Status = ZwEnumerateValueKey(KeyHandle, i, KeyValueFullInformation,
+                                     InfoBuffer, sizeof(InfoBuffer), &Length);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT("ZwEnumerateValueKey failed: 0x%08X\n", Status);
+            break;      /* failure */
+        }
+
+        /* create FromW string */
+        pInfo = (PKEY_VALUE_FULL_INFORMATION)InfoBuffer;
+        Length = pInfo->NameLength / sizeof(WCHAR);
+        pInfo->Name[Length] = UNICODE_NULL;   /* truncate */
+        Status = RtlCreateUnicodeString(&FromW, pInfo->Name);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT("RtlCreateUnicodeString failed: 0x%08X\n", Status);
+            break;      /* failure */
+        }
+
+        /* query value */
+        Status = ZwQueryValueKey(KeyHandle, &FromW, KeyValueFullInformation, 
+                                 InfoBuffer, sizeof(InfoBuffer), &Length);
+        pInfo = (PKEY_VALUE_FULL_INFORMATION)InfoBuffer;
+        if (!NT_SUCCESS(Status) || !pInfo->DataLength)
+        {
+            DPRINT("ZwQueryValueKey failed: 0x%08X\n", Status);
+            RtlFreeUnicodeString(&FromW);
+            break;      /* failure */
+        }
+
+        /* create ToW string */
+        pch = (LPWSTR)((PUCHAR)pInfo + pInfo->DataOffset);
+        Length = pInfo->DataLength / sizeof(WCHAR);
+        pch[Length] = UNICODE_NULL; /* truncate */
+        Status = RtlCreateUnicodeString(&ToW, pch);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT("RtlCreateUnicodeString failed: 0x%08X\n", Status);
+            RtlFreeUnicodeString(&FromW);
+            break;      /* failure */
+        }
+
+        /* does charset exist? (from) */
+        CharSets[FONTSUBST_FROM] = DEFAULT_CHARSET;
+        pch = wcsrchr(FromW.Buffer, L',');
+        if (pch)
+        {
+            /* truncate */
+            *pch = UNICODE_NULL;
+            FromW.Length = (pch - FromW.Buffer) * sizeof(WCHAR);
+            /* parse charset number */
+            CharSets[FONTSUBST_FROM] = (BYTE)_wtoi(pch + 1);
+        }
+
+        /* does charset exist? (to) */
+        CharSets[FONTSUBST_TO] = DEFAULT_CHARSET;
+        pch = wcsrchr(ToW.Buffer, L',');
+        if (pch)
+        {
+            /* truncate */
+            *pch = UNICODE_NULL;
+            ToW.Length = (pch - ToW.Buffer) * sizeof(WCHAR);
+            /* parse charset number */
+            CharSets[FONTSUBST_TO] = (BYTE)_wtoi(pch + 1);
+        }
+
+        /* allocate an entry */
+        pEntry = ExAllocatePoolWithTag(PagedPool, sizeof(FONTSUBST_ENTRY), TAG_FONT);
+        if (pEntry == NULL)
+        {
+            DPRINT("ExAllocatePoolWithTag failed\n");
+            RtlFreeUnicodeString(&FromW);
+            RtlFreeUnicodeString(&ToW);
+            break;      /* failure */
+        }
+
+        /* store to *pEntry */
+        pEntry->FontNames[FONTSUBST_FROM] = FromW;
+        pEntry->FontNames[FONTSUBST_TO] = ToW;
+        pEntry->CharSets[FONTSUBST_FROM] = CharSets[FONTSUBST_FROM];
+        pEntry->CharSets[FONTSUBST_TO] = CharSets[FONTSUBST_TO];
+
+        /* insert pEntry to *pHead */
+        InsertTailList(pHead, &pEntry->ListEntry);
+    }
+
+    /* close now */
+    ZwClose(KeyHandle);
+
+    return NT_SUCCESS(Status);
+}
+
 BOOL FASTCALL
 InitFontSupport(VOID)
 {
@@ -180,6 +393,7 @@ InitFontSupport(VOID)
     }
 
     IntLoadSystemFonts();
+    IntLoadFontSubstList(&FontSubstListHead);
 
     return TRUE;
 }
@@ -213,27 +427,137 @@ FtSetCoordinateTransform(
     FT_Set_Transform(face, &ftmatrix, 0);
 }
 
+static BOOL
+SubstituteFontByList(PLIST_ENTRY        pHead,
+                     PUNICODE_STRING    pOutputName,
+                     PUNICODE_STRING    pInputName,
+                     BYTE               RequestedCharSet,
+                     BYTE               CharSetMap[FONTSUBST_FROM_AND_TO])
+{
+    NTSTATUS            Status;
+    PLIST_ENTRY         pListEntry;
+    PFONTSUBST_ENTRY    pSubstEntry;
+    BYTE                CharSets[FONTSUBST_FROM_AND_TO];
+
+    CharSetMap[FONTSUBST_FROM] = DEFAULT_CHARSET;
+    CharSetMap[FONTSUBST_TO] = RequestedCharSet;
+
+    /* for each list entry */
+    for (pListEntry = pHead->Flink;
+         pListEntry != pHead;
+         pListEntry = pListEntry->Flink)
+    {
+        pSubstEntry =
+            (PFONTSUBST_ENTRY)CONTAINING_RECORD(pListEntry, FONT_ENTRY, ListEntry);
+
+        CharSets[FONTSUBST_FROM] = pSubstEntry->CharSets[FONTSUBST_FROM];
+
+        if (CharSets[FONTSUBST_FROM] != DEFAULT_CHARSET &&
+            CharSets[FONTSUBST_FROM] != RequestedCharSet)
+        {
+            continue;   /* not matched */
+        }
+
+        /* does charset number exist? (to) */
+        if (pSubstEntry->CharSets[FONTSUBST_TO] != DEFAULT_CHARSET)
+        {
+            CharSets[FONTSUBST_TO] = pSubstEntry->CharSets[FONTSUBST_TO];
+        }
+        else
+        {
+            CharSets[FONTSUBST_TO] = RequestedCharSet;
+        }
+
+        /* does font name match? */
+        if (!RtlEqualUnicodeString(&pSubstEntry->FontNames[FONTSUBST_FROM],
+                                   pInputName, TRUE))
+        {
+            continue;   /* not matched */
+        }
+
+        /* update *pOutputName */
+        RtlFreeUnicodeString(pOutputName);
+        Status = RtlCreateUnicodeString(pOutputName,
+                                        pSubstEntry->FontNames[FONTSUBST_TO].Buffer);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT("RtlCreateUnicodeString failed: 0x%08X\n", Status);
+            continue;   /* cannot create string */
+        }
+
+        if (CharSetMap[FONTSUBST_FROM] == DEFAULT_CHARSET)
+        {
+            /* update CharSetMap */
+            CharSetMap[FONTSUBST_FROM]  = CharSets[FONTSUBST_FROM];
+            CharSetMap[FONTSUBST_TO]    = CharSets[FONTSUBST_TO];
+        }
+        return TRUE;   /* success */
+    }
+
+    return FALSE;
+}
+
+static BOOL
+SubstituteFontRecurse(PUNICODE_STRING pInOutName, BYTE *pRequestedCharSet)
+{
+    UINT            RecurseCount = 5;
+    UNICODE_STRING  OutputNameW = { 0 };
+    BYTE            CharSetMap[FONTSUBST_FROM_AND_TO];
+    BOOL            Found;
+
+    if (pInOutName->Buffer[0] == UNICODE_NULL)
+        return FALSE;
+
+    while (RecurseCount-- > 0)
+    {
+        RtlInitUnicodeString(&OutputNameW, NULL);
+        Found = SubstituteFontByList(&FontSubstListHead,
+                                     &OutputNameW, pInOutName,
+                                     *pRequestedCharSet, CharSetMap);
+        if (!Found)
+            break;
+
+        /* update *pInOutName and *pRequestedCharSet */
+        RtlFreeUnicodeString(pInOutName);
+        *pInOutName = OutputNameW;
+        if (CharSetMap[FONTSUBST_FROM] == DEFAULT_CHARSET ||
+            CharSetMap[FONTSUBST_FROM] == *pRequestedCharSet)
+        {
+            *pRequestedCharSet = CharSetMap[FONTSUBST_TO];
+        }
+    }
+
+    return TRUE;    /* success */
+}
+
 /*
  * IntLoadSystemFonts
  *
  * Search the system font directory and adds each font found.
  */
-
 VOID FASTCALL
 IntLoadSystemFonts(VOID)
 {
     OBJECT_ATTRIBUTES ObjectAttributes;
-    UNICODE_STRING Directory, SearchPattern, FileName, TempString;
+    UNICODE_STRING Directory, FileName, TempString;
     IO_STATUS_BLOCK Iosb;
     HANDLE hDirectory;
     BYTE *DirInfoBuffer;
     PFILE_DIRECTORY_INFORMATION DirInfo;
     BOOLEAN bRestartScan = TRUE;
     NTSTATUS Status;
+    INT i;
+    static UNICODE_STRING SearchPatterns[] =
+    {
+        RTL_CONSTANT_STRING(L"*.ttf"),
+        RTL_CONSTANT_STRING(L"*.ttc"),
+        RTL_CONSTANT_STRING(L"*.otf"),
+        RTL_CONSTANT_STRING(L"*.otc"),
+        RTL_CONSTANT_STRING(L"*.fon"),
+        RTL_CONSTANT_STRING(L"*.fnt")
+    };
 
     RtlInitUnicodeString(&Directory, L"\\SystemRoot\\Fonts\\");
-    /* FIXME: Add support for other font types */
-    RtlInitUnicodeString(&SearchPattern, L"*.ttf");
 
     InitializeObjectAttributes(
         &ObjectAttributes,
@@ -252,66 +576,376 @@ IntLoadSystemFonts(VOID)
 
     if (NT_SUCCESS(Status))
     {
-        DirInfoBuffer = ExAllocatePoolWithTag(PagedPool, 0x4000, TAG_FONT);
-        if (DirInfoBuffer == NULL)
+        for (i = 0; i < _countof(SearchPatterns); ++i)
         {
-            ZwClose(hDirectory);
-            return;
-        }
-
-        FileName.Buffer = ExAllocatePoolWithTag(PagedPool, MAX_PATH * sizeof(WCHAR), TAG_FONT);
-        if (FileName.Buffer == NULL)
-        {
-            ExFreePoolWithTag(DirInfoBuffer, TAG_FONT);
-            ZwClose(hDirectory);
-            return;
-        }
-        FileName.Length = 0;
-        FileName.MaximumLength = MAX_PATH * sizeof(WCHAR);
-
-        while (1)
-        {
-            Status = ZwQueryDirectoryFile(
-                         hDirectory,
-                         NULL,
-                         NULL,
-                         NULL,
-                         &Iosb,
-                         DirInfoBuffer,
-                         0x4000,
-                         FileDirectoryInformation,
-                         FALSE,
-                         &SearchPattern,
-                         bRestartScan);
-
-            if (!NT_SUCCESS(Status) || Status == STATUS_NO_MORE_FILES)
+            DirInfoBuffer = ExAllocatePoolWithTag(PagedPool, 0x4000, TAG_FONT);
+            if (DirInfoBuffer == NULL)
             {
-                break;
+                ZwClose(hDirectory);
+                return;
             }
 
-            DirInfo = (PFILE_DIRECTORY_INFORMATION)DirInfoBuffer;
+            FileName.Buffer = ExAllocatePoolWithTag(PagedPool, MAX_PATH * sizeof(WCHAR), TAG_FONT);
+            if (FileName.Buffer == NULL)
+            {
+                ExFreePoolWithTag(DirInfoBuffer, TAG_FONT);
+                ZwClose(hDirectory);
+                return;
+            }
+            FileName.Length = 0;
+            FileName.MaximumLength = MAX_PATH * sizeof(WCHAR);
+
             while (1)
             {
-                TempString.Buffer = DirInfo->FileName;
-                TempString.Length =
-                    TempString.MaximumLength = DirInfo->FileNameLength;
-                RtlCopyUnicodeString(&FileName, &Directory);
-                RtlAppendUnicodeStringToString(&FileName, &TempString);
-                IntGdiAddFontResource(&FileName, 0);
-                if (DirInfo->NextEntryOffset == 0)
+                Status = ZwQueryDirectoryFile(
+                             hDirectory,
+                             NULL,
+                             NULL,
+                             NULL,
+                             &Iosb,
+                             DirInfoBuffer,
+                             0x4000,
+                             FileDirectoryInformation,
+                             FALSE,
+                             &SearchPatterns[i],
+                             bRestartScan);
+
+                if (!NT_SUCCESS(Status) || Status == STATUS_NO_MORE_FILES)
+                {
                     break;
-                DirInfo = (PFILE_DIRECTORY_INFORMATION)((ULONG_PTR)DirInfo + DirInfo->NextEntryOffset);
+                }
+
+                DirInfo = (PFILE_DIRECTORY_INFORMATION)DirInfoBuffer;
+                while (1)
+                {
+                    TempString.Buffer = DirInfo->FileName;
+                    TempString.Length =
+                        TempString.MaximumLength = DirInfo->FileNameLength;
+                    RtlCopyUnicodeString(&FileName, &Directory);
+                    RtlAppendUnicodeStringToString(&FileName, &TempString);
+                    IntGdiAddFontResource(&FileName, 0);
+                    if (DirInfo->NextEntryOffset == 0)
+                        break;
+                    DirInfo = (PFILE_DIRECTORY_INFORMATION)((ULONG_PTR)DirInfo + DirInfo->NextEntryOffset);
+                }
+
+                bRestartScan = FALSE;
             }
 
-            bRestartScan = FALSE;
+            ExFreePoolWithTag(FileName.Buffer, TAG_FONT);
+            ExFreePoolWithTag(DirInfoBuffer, TAG_FONT);
         }
-
-        ExFreePoolWithTag(FileName.Buffer, TAG_FONT);
-        ExFreePoolWithTag(DirInfoBuffer, TAG_FONT);
         ZwClose(hDirectory);
     }
 }
 
+static BYTE
+ItalicFromStyle(const char *style_name)
+{
+    if (style_name == NULL || style_name[0] == 0)
+        return FALSE;
+    if (strstr(style_name, "Italic") != NULL)
+        return TRUE;
+    if (strstr(style_name, "Oblique") != NULL)
+        return TRUE;
+    return FALSE;
+}
+
+static LONG
+WeightFromStyle(const char *style_name)
+{
+    if (style_name == NULL || style_name[0] == 0)
+        return FW_NORMAL;
+    if (strstr(style_name, "Regular") != NULL)
+        return FW_REGULAR;
+    if (strstr(style_name, "Normal") != NULL)
+        return FW_NORMAL;
+    if (strstr(style_name, "SemiBold") != NULL)
+        return FW_SEMIBOLD;
+    if (strstr(style_name, "UltraBold") != NULL)
+        return FW_ULTRABOLD;
+    if (strstr(style_name, "DemiBold") != NULL)
+        return FW_DEMIBOLD;
+    if (strstr(style_name, "ExtraBold") != NULL)
+        return FW_EXTRABOLD;
+    if (strstr(style_name, "Bold") != NULL)
+        return FW_BOLD;
+    if (strstr(style_name, "UltraLight") != NULL)
+        return FW_ULTRALIGHT;
+    if (strstr(style_name, "ExtraLight") != NULL)
+        return FW_EXTRALIGHT;
+    if (strstr(style_name, "Light") != NULL)
+        return FW_LIGHT;
+    if (strstr(style_name, "Hairline") != NULL)
+        return 50;
+    if (strstr(style_name, "Book") != NULL)
+        return 350;
+    if (strstr(style_name, "ExtraBlack") != NULL)
+        return 950;
+    if (strstr(style_name, "UltraBlack") != NULL)
+        return 1000;
+    if (strstr(style_name, "Black") != NULL)
+        return FW_BLACK;
+    if (strstr(style_name, "Medium") != NULL)
+        return FW_MEDIUM;
+    if (strstr(style_name, "Thin") != NULL)
+        return FW_THIN;
+    if (strstr(style_name, "Heavy") != NULL)
+        return FW_HEAVY;
+    return FW_NORMAL;
+}
+
+typedef struct GDI_LOAD_FONT
+{
+    PUNICODE_STRING     pFileName;
+    PVOID               Buffer;
+    ULONG               BufferSize;
+    DWORD               Characteristics;
+    UNICODE_STRING      RegValueName;
+    BOOL                IsTrueType;
+} GDI_LOAD_FONT, *PGDI_LOAD_FONT;
+
+static INT FASTCALL
+IntGdiLoadFontsFromMemory(PGDI_LOAD_FONT pLoadFont,
+                          PSHARED_FACE SharedFace, FT_Long FontIndex, INT CharSetIndex)
+{
+    FT_Error            Error;
+    PFONT_ENTRY         Entry;
+    FONTGDI *           FontGDI;
+    NTSTATUS            Status;
+    FT_Face             Face;
+    ANSI_STRING         AnsiFaceName;
+    FT_WinFNT_HeaderRec WinFNT;
+    INT                 FontCount = 0, CharSetCount = 0;
+    PUNICODE_STRING     pFileName       = pLoadFont->pFileName;
+    PVOID               Buffer          = pLoadFont->Buffer;
+    ULONG               BufferSize      = pLoadFont->BufferSize;
+    DWORD               Characteristics = pLoadFont->Characteristics;
+    PUNICODE_STRING     pValueName = &pLoadFont->RegValueName;
+    TT_OS2 *            pOS2;
+    INT                 BitIndex;
+    FT_UShort           os2_version;
+    FT_ULong            os2_ulCodePageRange1;
+    FT_UShort           os2_usWeightClass;
+
+    if (SharedFace == NULL && CharSetIndex == -1)
+    {
+        /* load a face from memory */
+        IntLockFreeType;
+        Error = FT_New_Memory_Face(
+                    library,
+                    Buffer,
+                    BufferSize,
+                    ((FontIndex != -1) ? FontIndex : 0),
+                    &Face);
+        IntUnLockFreeType;
+
+        if (FT_IS_SFNT(Face))
+            pLoadFont->IsTrueType = TRUE;
+
+        if (!Error)
+            SharedFace = SharedFace_Create(Face);
+        if (Error || SharedFace == NULL)
+        {
+            if (Error == FT_Err_Unknown_File_Format)
+                DPRINT1("Unknown font file format\n");
+            else
+                DPRINT1("Error reading font file (error code: %d)\n", Error);
+            return 0;   /* failure */
+        }
+    }
+    else
+    {
+        Face = SharedFace->Face;
+        SharedFace_AddRef(SharedFace);
+    }
+
+    /* allocate a FONT_ENTRY */
+    Entry = ExAllocatePoolWithTag(PagedPool, sizeof(FONT_ENTRY), TAG_FONT);
+    if (!Entry)
+    {
+        SharedFace_Release(SharedFace);
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;   /* failure */
+    }
+
+    /* allocate a FONTGDI */
+    FontGDI = EngAllocMem(FL_ZERO_MEMORY, sizeof(FONTGDI), GDITAG_RFONT);
+    if (!FontGDI)
+    {
+        SharedFace_Release(SharedFace);
+        ExFreePoolWithTag(Entry, TAG_FONT);
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;   /* failure */
+    }
+
+    /* set file name */
+    FontGDI->Filename = ExAllocatePoolWithTag(PagedPool,
+                                              pFileName->Length + sizeof(UNICODE_NULL),
+                                              GDITAG_PFF);
+    if (FontGDI->Filename == NULL)
+    {
+        EngFreeMem(FontGDI);
+        SharedFace_Release(SharedFace);
+        ExFreePoolWithTag(Entry, TAG_FONT);
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;   /* failure */
+    }
+    RtlCopyMemory(FontGDI->Filename, pFileName->Buffer, pFileName->Length);
+    FontGDI->Filename[pFileName->Length / sizeof(WCHAR)] = UNICODE_NULL;
+
+    /* set face */
+    FontGDI->SharedFace = SharedFace;
+    FontGDI->CharSet = ANSI_CHARSET;
+    FontGDI->OriginalItalic = ItalicFromStyle(Face->style_name);
+    FontGDI->RequestItalic = FALSE;
+    FontGDI->OriginalWeight = WeightFromStyle(Face->style_name);
+    FontGDI->RequestWeight = FW_NORMAL;
+
+    RtlInitAnsiString(&AnsiFaceName, Face->family_name);
+    Status = RtlAnsiStringToUnicodeString(&Entry->FaceName, &AnsiFaceName, TRUE);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(FontGDI->Filename, GDITAG_PFF);
+        EngFreeMem(FontGDI);
+        SharedFace_Release(SharedFace);
+        ExFreePoolWithTag(Entry, TAG_FONT);
+        return 0;
+    }
+
+    os2_version = 0;
+    IntLockFreeType;
+    pOS2 = (TT_OS2 *)FT_Get_Sfnt_Table(Face, FT_SFNT_OS2);
+    if (pOS2)
+    {
+        os2_version = pOS2->version;
+        os2_ulCodePageRange1 = pOS2->ulCodePageRange1;
+        os2_usWeightClass = pOS2->usWeightClass;
+    }
+    IntUnLockFreeType;
+
+    if (pOS2 && os2_version >= 1)
+    {
+        /* get charset and weight from OS/2 header */
+
+        /* Make sure we do not use this pointer anymore */
+        pOS2 = NULL;
+
+        for (BitIndex = 0; BitIndex < MAXTCIINDEX; ++BitIndex)
+        {
+            if (os2_ulCodePageRange1 & (1 << BitIndex))
+            {
+                if (FontTci[BitIndex].ciCharset == DEFAULT_CHARSET)
+                    continue;
+
+                if ((CharSetIndex == -1 && CharSetCount == 0) ||
+                    CharSetIndex == CharSetCount)
+                {
+                    FontGDI->CharSet = FontTci[BitIndex].ciCharset;
+                }
+
+                ++CharSetCount;
+            }
+        }
+
+        /* set actual weight */
+        FontGDI->OriginalWeight = os2_usWeightClass;
+    }
+    else
+    {
+        /* get charset from WinFNT header */
+        IntLockFreeType;
+        Error = FT_Get_WinFNT_Header(Face, &WinFNT);
+        if (!Error)
+        {
+            FontGDI->CharSet = WinFNT.charset;
+        }
+        IntUnLockFreeType;
+    }
+
+    /* FIXME: CharSet is invalid on Marlett */
+    if (RtlEqualUnicodeString(&Entry->FaceName, &MarlettW, TRUE))
+    {
+        FontGDI->CharSet = SYMBOL_CHARSET;
+    }
+
+    ++FontCount;
+    DPRINT("Font loaded: %s (%s)\n", Face->family_name, Face->style_name);
+    DPRINT("Num glyphs: %d\n", Face->num_glyphs);
+    DPRINT("CharSet: %d\n", FontGDI->CharSet);
+
+    /* Add this font resource to the font table */
+    Entry->Font = FontGDI;
+    Entry->NotEnum = (Characteristics & FR_NOT_ENUM);
+
+    if (Characteristics & FR_PRIVATE)
+    {
+        /* private font */
+        PPROCESSINFO Win32Process = PsGetCurrentProcessWin32Process();
+        IntLockProcessPrivateFonts(Win32Process);
+        InsertTailList(&Win32Process->PrivateFontListHead, &Entry->ListEntry);
+        IntUnLockProcessPrivateFonts(Win32Process);
+    }
+    else
+    {
+        /* global font */
+        IntLockGlobalFonts;
+        InsertTailList(&FontListHead, &Entry->ListEntry);
+        IntUnLockGlobalFonts;
+    }
+
+    if (FontIndex == -1)
+    {
+        if (FT_IS_SFNT(Face))
+        {
+            TT_Face TrueType = (TT_Face)Face;
+            if (TrueType->ttc_header.count > 1)
+            {
+                FT_Long i;
+                for (i = 1; i < TrueType->ttc_header.count; ++i)
+                {
+                    FontCount += IntGdiLoadFontsFromMemory(pLoadFont, NULL, i, -1);
+                }
+            }
+        }
+        FontIndex = 0;
+    }
+
+    if (CharSetIndex == -1)
+    {
+        INT i;
+
+        if (pLoadFont->RegValueName.Length == 0)
+        {
+            RtlCreateUnicodeString(pValueName, Entry->FaceName.Buffer);
+        }
+        else
+        {
+            UNICODE_STRING NewString;
+            USHORT Length = pValueName->Length + 3 * sizeof(WCHAR) + Entry->FaceName.Length;
+            NewString.Length = 0;
+            NewString.MaximumLength = Length + sizeof(WCHAR);
+            NewString.Buffer = ExAllocatePoolWithTag(PagedPool,
+                                                     NewString.MaximumLength,
+                                                     TAG_USTR);
+            NewString.Buffer[0] = UNICODE_NULL;
+
+            RtlAppendUnicodeStringToString(&NewString, pValueName);
+            RtlAppendUnicodeToString(&NewString, L" & ");
+            RtlAppendUnicodeStringToString(&NewString, &Entry->FaceName);
+
+            RtlFreeUnicodeString(pValueName);
+            *pValueName = NewString;
+        }
+
+        for (i = 1; i < CharSetCount; ++i)
+        {
+            FontCount += IntGdiLoadFontsFromMemory(pLoadFont, SharedFace, FontIndex, i);
+        }
+    }
+
+    return FontCount;   /* number of loaded fonts */
+}
 
 /*
  * IntGdiAddFontResource
@@ -322,23 +956,20 @@ IntLoadSystemFonts(VOID)
 INT FASTCALL
 IntGdiAddFontResource(PUNICODE_STRING FileName, DWORD Characteristics)
 {
-    FONTGDI *FontGDI;
     NTSTATUS Status;
-    HANDLE FileHandle, KeyHandle;
-    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE FileHandle;
     PVOID Buffer = NULL;
     IO_STATUS_BLOCK Iosb;
-    INT Error;
-    FT_Face Face;
-    ANSI_STRING AnsiFaceName;
-    PFONT_ENTRY Entry;
     PVOID SectionObject;
     ULONG ViewSize = 0;
     LARGE_INTEGER SectionSize;
-    UNICODE_STRING FontRegPath = RTL_CONSTANT_STRING(L"\\REGISTRY\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Fonts");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    GDI_LOAD_FONT   LoadFont;
+    INT FontCount;
+    HANDLE KeyHandle;
+    static const UNICODE_STRING TrueTypePostfix = RTL_CONSTANT_STRING(L" (TrueType)");
 
     /* Open the font file */
-
     InitializeObjectAttributes(&ObjectAttributes, FileName, 0, NULL, NULL);
     Status = ZwOpenFile(
                  &FileHandle,
@@ -347,7 +978,6 @@ IntGdiAddFontResource(PUNICODE_STRING FileName, DWORD Characteristics)
                  &Iosb,
                  FILE_SHARE_READ,
                  FILE_SYNCHRONOUS_IO_NONALERT);
-
     if (!NT_SUCCESS(Status))
     {
         DPRINT("Could not load font file: %wZ\n", FileName);
@@ -364,7 +994,6 @@ IntGdiAddFontResource(PUNICODE_STRING FileName, DWORD Characteristics)
         ZwClose(FileHandle);
         return 0;
     }
-
     ZwClose(FileHandle);
 
     Status = MmMapViewInSystemSpace(SectionObject, &Buffer, &ViewSize);
@@ -375,100 +1004,63 @@ IntGdiAddFontResource(PUNICODE_STRING FileName, DWORD Characteristics)
         return 0;
     }
 
-    IntLockFreeType;
-    Error = FT_New_Memory_Face(
-                library,
-                Buffer,
-                ViewSize,
-                0,
-                &Face);
-    IntUnLockFreeType;
+    LoadFont.pFileName          = FileName;
+    LoadFont.Buffer             = Buffer;
+    LoadFont.BufferSize         = ViewSize;
+    LoadFont.Characteristics    = Characteristics;
+    RtlInitUnicodeString(&LoadFont.RegValueName, NULL);
+    LoadFont.IsTrueType         = FALSE;
+    FontCount = IntGdiLoadFontsFromMemory(&LoadFont, NULL, -1, -1);
+
     ObDereferenceObject(SectionObject);
 
-    if (Error)
+    if (FontCount > 0)
     {
-        if (Error == FT_Err_Unknown_File_Format)
-            DPRINT("Unknown font file format\n");
-        else
-            DPRINT("Error reading font file (error code: %d)\n", Error);
-        return 0;
-    }
+        if (LoadFont.IsTrueType)
+        {
+            /* append " (TrueType)" */
+            UNICODE_STRING NewString;
+            USHORT Length;
 
-    Entry = ExAllocatePoolWithTag(PagedPool, sizeof(FONT_ENTRY), TAG_FONT);
-    if (!Entry)
-    {
-        FT_Done_Face(Face);
-        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
-        return 0;
-    }
+            Length = LoadFont.RegValueName.Length + TrueTypePostfix.Length;
+            NewString.Length = 0;
+            NewString.MaximumLength = Length + sizeof(WCHAR);
+            NewString.Buffer = ExAllocatePoolWithTag(PagedPool,
+                                                     NewString.MaximumLength,
+                                                     TAG_USTR);
+            NewString.Buffer[0] = UNICODE_NULL;
 
-    FontGDI = EngAllocMem(FL_ZERO_MEMORY, sizeof(FONTGDI), GDITAG_RFONT);
-    if (FontGDI == NULL)
-    {
-        FT_Done_Face(Face);
-        ExFreePoolWithTag(Entry, TAG_FONT);
-        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
-        return 0;
-    }
+            RtlAppendUnicodeStringToString(&NewString, &LoadFont.RegValueName);
+            RtlAppendUnicodeStringToString(&NewString, &TrueTypePostfix);
+            RtlFreeUnicodeString(&LoadFont.RegValueName);
+            LoadFont.RegValueName = NewString;
+        }
 
-    FontGDI->Filename = ExAllocatePoolWithTag(PagedPool, FileName->Length + sizeof(WCHAR), GDITAG_PFF);
-    if (FontGDI->Filename == NULL)
-    {
-        EngFreeMem(FontGDI);
-        FT_Done_Face(Face);
-        ExFreePoolWithTag(Entry, TAG_FONT);
-        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
-        return 0;
-    }
-    RtlCopyMemory(FontGDI->Filename, FileName->Buffer, FileName->Length);
-    FontGDI->Filename[FileName->Length / sizeof(WCHAR)] = L'\0';
-    FontGDI->face = Face;
-
-    DPRINT("Font loaded: %s (%s)\n", Face->family_name, Face->style_name);
-    DPRINT("Num glyphs: %d\n", Face->num_glyphs);
-
-    /* Add this font resource to the font table */
-
-    Entry->Font = FontGDI;
-    Entry->NotEnum = (Characteristics & FR_NOT_ENUM);
-    RtlInitAnsiString(&AnsiFaceName, (LPSTR)Face->family_name);
-    Status = RtlAnsiStringToUnicodeString(&Entry->FaceName, &AnsiFaceName, TRUE);
-    if (!NT_SUCCESS(Status))
-    {
-        ExFreePoolWithTag(FontGDI->Filename, GDITAG_PFF);
-        EngFreeMem(FontGDI);
-        FT_Done_Face(Face);
-        ExFreePoolWithTag(Entry, TAG_FONT);
-        return 0;
-    }
-
-    if (Characteristics & FR_PRIVATE)
-    {
-        PPROCESSINFO Win32Process = PsGetCurrentProcessWin32Process();
-        IntLockProcessPrivateFonts(Win32Process);
-        InsertTailList(&Win32Process->PrivateFontListHead, &Entry->ListEntry);
-        IntUnLockProcessPrivateFonts(Win32Process);
-    }
-    else
-    {
-        IntLockGlobalFonts;
-        InsertTailList(&FontListHead, &Entry->ListEntry);
-        InitializeObjectAttributes(&ObjectAttributes, &FontRegPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+        /* registry */
+        InitializeObjectAttributes(&ObjectAttributes, &FontRegPath,
+                                   OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                                   NULL, NULL);
         Status = ZwOpenKey(&KeyHandle, KEY_WRITE, &ObjectAttributes);
         if (NT_SUCCESS(Status))
         {
-            LPWSTR pName = wcsrchr(FileName->Buffer, L'\\');
-            if (pName)
+            ULONG DataSize;
+            LPWSTR pFileName = wcsrchr(FileName->Buffer, L'\\');
+            if (pFileName)
             {
-                pName++;
-                ZwSetValueKey(KeyHandle, &Entry->FaceName, 0, REG_SZ, pName, (wcslen(pName) + 1) * sizeof(WCHAR));
+                pFileName++;
+                DataSize = (wcslen(pFileName) + 1) * sizeof(WCHAR);
+                ZwSetValueKey(KeyHandle, &LoadFont.RegValueName, 0, REG_SZ,
+                              pFileName, DataSize);
             }
             ZwClose(KeyHandle);
         }
-        IntUnLockGlobalFonts;
     }
-    return 1;
+    RtlFreeUnicodeString(&LoadFont.RegValueName);
+
+    return FontCount;
 }
+
+// FIXME: Add RemoveFontResource
 
 BOOL FASTCALL
 IntIsFontRenderingEnabled(VOID)
@@ -494,6 +1086,7 @@ IntGetFontRenderMode(LOGFONTW *logfont)
 {
     switch (logfont->lfQuality)
     {
+    case ANTIALIASED_QUALITY:
     case NONANTIALIASED_QUALITY:
         return FT_RENDER_MODE_MONO;
     case DRAFT_QUALITY:
@@ -509,6 +1102,7 @@ NTSTATUS FASTCALL
 TextIntCreateFontIndirect(CONST LPLOGFONTW lf, HFONT *NewFont)
 {
     PLFONT plfont;
+    LOGFONTW *plf;
 
     plfont = LFONT_AllocFontWithHandle();
     if (!plfont)
@@ -518,12 +1112,12 @@ TextIntCreateFontIndirect(CONST LPLOGFONTW lf, HFONT *NewFont)
 
     ExInitializePushLock(&plfont->lock);
     *NewFont = plfont->BaseObject.hHmgr;
-    RtlCopyMemory(&plfont->logfont.elfEnumLogfontEx.elfLogFont, lf, sizeof(LOGFONTW));
+    plf = &plfont->logfont.elfEnumLogfontEx.elfLogFont;
+    RtlCopyMemory(plf, lf, sizeof(LOGFONTW));
     if (lf->lfEscapement != lf->lfOrientation)
     {
         /* This should really depend on whether GM_ADVANCED is set */
-        plfont->logfont.elfEnumLogfontEx.elfLogFont.lfOrientation =
-            plfont->logfont.elfEnumLogfontEx.elfLogFont.lfEscapement;
+        plf->lfOrientation = plf->lfEscapement;
     }
     LFONT_UnlockFont(plfont);
 
@@ -602,38 +1196,52 @@ static BOOL face_has_symbol_charmap(FT_Face ft_face)
     return FALSE;
 }
 
+
 static void FASTCALL
-FillTM(TEXTMETRICW *TM, PFONTGDI FontGDI, TT_OS2 *pOS2, TT_HoriHeader *pHori, FT_WinFNT_HeaderRec *pWin)
+FillTMEx(TEXTMETRICW *TM, PFONTGDI FontGDI,
+         TT_OS2 *pOS2, TT_HoriHeader *pHori,
+         FT_WinFNT_HeaderRec *pFNT, BOOL RealFont)
 {
     FT_Fixed XScale, YScale;
     int Ascent, Descent;
-    FT_Face Face = FontGDI->face;
+    FT_Face Face = FontGDI->SharedFace->Face;
 
     XScale = Face->size->metrics.x_scale;
     YScale = Face->size->metrics.y_scale;
 
-    if (pWin)
+    if (pFNT)
     {
-        TM->tmHeight           = pWin->pixel_height;
-        TM->tmAscent           = pWin->ascent;
+        TM->tmHeight           = pFNT->pixel_height;
+        TM->tmAscent           = pFNT->ascent;
         TM->tmDescent          = TM->tmHeight - TM->tmAscent;
-        TM->tmInternalLeading  = pWin->internal_leading;
-        TM->tmExternalLeading  = pWin->external_leading;
-        TM->tmAveCharWidth     = pWin->avg_width;
-        TM->tmMaxCharWidth     = pWin->max_width;
-        TM->tmWeight           = pWin->weight;
+        TM->tmInternalLeading  = pFNT->internal_leading;
+        TM->tmExternalLeading  = pFNT->external_leading;
+        TM->tmAveCharWidth     = pFNT->avg_width;
+        TM->tmMaxCharWidth     = pFNT->max_width;
         TM->tmOverhang         = 0;
-        TM->tmDigitizedAspectX = pWin->horizontal_resolution;
-        TM->tmDigitizedAspectY = pWin->vertical_resolution;
-        TM->tmFirstChar        = pWin->first_char;
-        TM->tmLastChar         = pWin->last_char;
-        TM->tmDefaultChar      = pWin->default_char + pWin->first_char;
-        TM->tmBreakChar        = pWin->break_char + pWin->first_char;
-        TM->tmItalic           = pWin->italic;
-        TM->tmUnderlined       = FontGDI->Underline;
-        TM->tmStruckOut        = FontGDI->StrikeOut;
-        TM->tmPitchAndFamily   = pWin->pitch_and_family;
-        TM->tmCharSet          = pWin->charset;
+        TM->tmDigitizedAspectX = pFNT->horizontal_resolution;
+        TM->tmDigitizedAspectY = pFNT->vertical_resolution;
+        TM->tmFirstChar        = pFNT->first_char;
+        TM->tmLastChar         = pFNT->last_char;
+        TM->tmDefaultChar      = pFNT->default_char + pFNT->first_char;
+        TM->tmBreakChar        = pFNT->break_char + pFNT->first_char;
+        TM->tmPitchAndFamily   = pFNT->pitch_and_family;
+        if (RealFont)
+        {
+            TM->tmWeight       = FontGDI->OriginalWeight;
+            TM->tmItalic       = FontGDI->OriginalItalic;
+            TM->tmUnderlined   = pFNT->underline;
+            TM->tmStruckOut    = pFNT->strike_out;
+            TM->tmCharSet      = pFNT->charset;
+        }
+        else
+        {
+            TM->tmWeight       = FontGDI->RequestWeight;
+            TM->tmItalic       = FontGDI->RequestItalic;
+            TM->tmUnderlined   = FontGDI->RequestUnderline;
+            TM->tmStruckOut    = FontGDI->RequestStrikeOut;
+            TM->tmCharSet      = FontGDI->CharSet;
+        }
         return;
     }
 
@@ -676,11 +1284,28 @@ FillTM(TEXTMETRICW *TM, PFONTGDI FontGDI, TT_OS2 *pOS2, TT_HoriHeader *pHori, FT
     /* Correct forumla to get the maxcharwidth from unicode and ansi font */
     TM->tmMaxCharWidth = (FT_MulFix(Face->max_advance_width, XScale) + 32) >> 6;
 
-    TM->tmWeight = pOS2->usWeightClass;
+    if (RealFont)
+    {
+        TM->tmWeight = FontGDI->OriginalWeight;
+    }
+    else
+    {
+        if (FontGDI->OriginalWeight != FW_DONTCARE &&
+            FontGDI->OriginalWeight != FW_NORMAL)
+        {
+            TM->tmWeight = FontGDI->OriginalWeight;
+        }
+        else
+        {
+            TM->tmWeight = FontGDI->RequestWeight;
+        }
+    }
+
     TM->tmOverhang = 0;
     TM->tmDigitizedAspectX = 96;
     TM->tmDigitizedAspectY = 96;
-    if (face_has_symbol_charmap(Face) || (pOS2->usFirstCharIndex >= 0xf000 && pOS2->usFirstCharIndex < 0xf100))
+    if (face_has_symbol_charmap(Face) ||
+        (pOS2->usFirstCharIndex >= 0xf000 && pOS2->usFirstCharIndex < 0xf100))
     {
         USHORT cpOEM, cpAnsi;
 
@@ -710,14 +1335,30 @@ FillTM(TEXTMETRICW *TM, PFONTGDI FontGDI, TT_OS2 *pOS2, TT_HoriHeader *pHori, FT
             TM->tmBreakChar = pOS2->usFirstCharIndex;
         TM->tmDefaultChar = TM->tmBreakChar - 1;
     }
-    TM->tmItalic = (Face->style_flags & FT_STYLE_FLAG_ITALIC) ? 255 : 0;
-    TM->tmUnderlined = FontGDI->Underline;
-    TM->tmStruckOut  = FontGDI->StrikeOut;
 
-    /* Yes TPMF_FIXED_PITCH is correct; braindead api */
-    if (! FT_IS_FIXED_WIDTH(Face))
+    if (RealFont)
     {
-        TM->tmPitchAndFamily = TMPF_FIXED_PITCH;
+        TM->tmItalic = FontGDI->OriginalItalic;
+        TM->tmUnderlined = FALSE;
+        TM->tmStruckOut  = FALSE;
+    }
+    else
+    {
+        if (FontGDI->OriginalItalic || FontGDI->RequestItalic)
+        {
+            TM->tmItalic = 0xFF;
+        }
+        else
+        {
+            TM->tmItalic = 0;
+        }
+        TM->tmUnderlined = (FontGDI->RequestUnderline ? 0xFF : 0);
+        TM->tmStruckOut  = (FontGDI->RequestStrikeOut ? 0xFF : 0);
+    }
+
+    if (!FT_IS_FIXED_WIDTH(Face))
+    {
+        TM->tmPitchAndFamily = _TMPF_VARIABLE_PITCH;
     }
     else
     {
@@ -787,7 +1428,15 @@ FillTM(TEXTMETRICW *TM, PFONTGDI FontGDI, TT_OS2 *pOS2, TT_HoriHeader *pHori, FT
         TM->tmPitchAndFamily |= TMPF_TRUETYPE;
     }
 
-    TM->tmCharSet = DEFAULT_CHARSET;
+    TM->tmCharSet = FontGDI->CharSet;
+}
+
+static void FASTCALL
+FillTM(TEXTMETRICW *TM, PFONTGDI FontGDI,
+       TT_OS2 *pOS2, TT_HoriHeader *pHori,
+       FT_WinFNT_HeaderRec *pFNT)
+{
+    FillTMEx(TM, FontGDI, pOS2, pHori, pFNT, FALSE);
 }
 
 /*************************************************************
@@ -810,17 +1459,18 @@ IntGetOutlineTextMetrics(PFONTGDI FontGDI,
     FT_Error Error;
     char *Cp;
     NTSTATUS status;
+    FT_Face Face = FontGDI->SharedFace->Face;
 
     Needed = sizeof(OUTLINETEXTMETRICW);
 
-    RtlInitAnsiString(&FamilyNameA, FontGDI->face->family_name);
+    RtlInitAnsiString(&FamilyNameA, Face->family_name);
     status = RtlAnsiStringToUnicodeString(&FamilyNameW, &FamilyNameA, TRUE);
     if (!NT_SUCCESS(status))
     {
         return 0;
     }
 
-    RtlInitAnsiString(&StyleNameA, FontGDI->face->style_name);
+    RtlInitAnsiString(&StyleNameA, Face->style_name);
     status = RtlAnsiStringToUnicodeString(&StyleNameW, &StyleNameA, TRUE);
     if (!NT_SUCCESS(status))
     {
@@ -833,9 +1483,9 @@ IntGetOutlineTextMetrics(PFONTGDI FontGDI,
     /* Length of otmpFamilyName */
     Needed += FamilyNameW.Length + sizeof(WCHAR);
 
-    RtlInitUnicodeString(&Regular, L"regular");
+    RtlInitUnicodeString(&Regular, L"Regular");
     /* Length of otmpFaceName */
-    if (0 == RtlCompareUnicodeString(&StyleNameW, &Regular, TRUE))
+    if (RtlEqualUnicodeString(&StyleNameW, &Regular, TRUE))
     {
         Needed += FamilyNameW.Length + sizeof(WCHAR); /* Just the family name */
     }
@@ -857,11 +1507,11 @@ IntGetOutlineTextMetrics(PFONTGDI FontGDI,
         return Needed;
     }
 
-    XScale = FontGDI->face->size->metrics.x_scale;
-    YScale = FontGDI->face->size->metrics.y_scale;
+    XScale = Face->size->metrics.x_scale;
+    YScale = Face->size->metrics.y_scale;
 
     IntLockFreeType;
-    pOS2 = FT_Get_Sfnt_Table(FontGDI->face, ft_sfnt_os2);
+    pOS2 = FT_Get_Sfnt_Table(Face, ft_sfnt_os2);
     if (NULL == pOS2)
     {
         IntUnLockFreeType;
@@ -871,7 +1521,7 @@ IntGetOutlineTextMetrics(PFONTGDI FontGDI,
         return 0;
     }
 
-    pHori = FT_Get_Sfnt_Table(FontGDI->face, ft_sfnt_hhea);
+    pHori = FT_Get_Sfnt_Table(Face, ft_sfnt_hhea);
     if (NULL == pHori)
     {
         IntUnLockFreeType;
@@ -881,9 +1531,9 @@ IntGetOutlineTextMetrics(PFONTGDI FontGDI,
         return 0;
     }
 
-    pPost = FT_Get_Sfnt_Table(FontGDI->face, ft_sfnt_post); /* We can live with this failing */
+    pPost = FT_Get_Sfnt_Table(Face, ft_sfnt_post); /* We can live with this failing */
 
-    Error = FT_Get_WinFNT_Header(FontGDI->face , &Win);
+    Error = FT_Get_WinFNT_Header(Face , &Win);
 
     Otm->otmSize = Needed;
 
@@ -896,16 +1546,16 @@ IntGetOutlineTextMetrics(PFONTGDI FontGDI,
     Otm->otmsCharSlopeRise = pHori->caret_Slope_Rise;
     Otm->otmsCharSlopeRun = pHori->caret_Slope_Run;
     Otm->otmItalicAngle = 0; /* POST table */
-    Otm->otmEMSquare = FontGDI->face->units_per_EM;
+    Otm->otmEMSquare = Face->units_per_EM;
     Otm->otmAscent = (FT_MulFix(pOS2->sTypoAscender, YScale) + 32) >> 6;
     Otm->otmDescent = (FT_MulFix(pOS2->sTypoDescender, YScale) + 32) >> 6;
     Otm->otmLineGap = (FT_MulFix(pOS2->sTypoLineGap, YScale) + 32) >> 6;
     Otm->otmsCapEmHeight = (FT_MulFix(pOS2->sCapHeight, YScale) + 32) >> 6;
     Otm->otmsXHeight = (FT_MulFix(pOS2->sxHeight, YScale) + 32) >> 6;
-    Otm->otmrcFontBox.left = (FT_MulFix(FontGDI->face->bbox.xMin, XScale) + 32) >> 6;
-    Otm->otmrcFontBox.right = (FT_MulFix(FontGDI->face->bbox.xMax, XScale) + 32) >> 6;
-    Otm->otmrcFontBox.top = (FT_MulFix(FontGDI->face->bbox.yMax, YScale) + 32) >> 6;
-    Otm->otmrcFontBox.bottom = (FT_MulFix(FontGDI->face->bbox.yMin, YScale) + 32) >> 6;
+    Otm->otmrcFontBox.left = (FT_MulFix(Face->bbox.xMin, XScale) + 32) >> 6;
+    Otm->otmrcFontBox.right = (FT_MulFix(Face->bbox.xMax, XScale) + 32) >> 6;
+    Otm->otmrcFontBox.top = (FT_MulFix(Face->bbox.yMax, YScale) + 32) >> 6;
+    Otm->otmrcFontBox.bottom = (FT_MulFix(Face->bbox.yMin, YScale) + 32) >> 6;
     Otm->otmMacAscent = Otm->otmTextMetrics.tmAscent;
     Otm->otmMacDescent = -Otm->otmTextMetrics.tmDescent;
     Otm->otmMacLineGap = Otm->otmLineGap;
@@ -943,7 +1593,7 @@ IntGetOutlineTextMetrics(PFONTGDI FontGDI,
     Cp += StyleNameW.Length + sizeof(WCHAR);
     Otm->otmpFaceName = (LPSTR)(Cp - (char*) Otm);
     wcscpy((WCHAR*) Cp, FamilyNameW.Buffer);
-    if (0 != RtlCompareUnicodeString(&StyleNameW, &Regular, TRUE))
+    if (!RtlEqualUnicodeString(&StyleNameW, &Regular, TRUE))
     {
         wcscat((WCHAR*) Cp, L" ");
         wcscat((WCHAR*) Cp, StyleNameW.Buffer);
@@ -982,7 +1632,7 @@ FindFaceNameInList(PUNICODE_STRING FaceName, PLIST_ENTRY Head)
         FontGDI = CurrentEntry->Font;
         ASSERT(FontGDI);
 
-        RtlInitAnsiString(&EntryFaceNameA, FontGDI->face->family_name);
+        RtlInitAnsiString(&EntryFaceNameA, FontGDI->SharedFace->Face->family_name);
         status = RtlAnsiStringToUnicodeString(&EntryFaceNameW, &EntryFaceNameA, TRUE);
         if (!NT_SUCCESS(status))
         {
@@ -995,7 +1645,7 @@ FindFaceNameInList(PUNICODE_STRING FaceName, PLIST_ENTRY Head)
             EntryFaceNameW.Buffer[LF_FACESIZE - 1] = L'\0';
         }
 
-        if (0 == RtlCompareUnicodeString(FaceName, &EntryFaceNameW, TRUE))
+        if (RtlEqualUnicodeString(FaceName, &EntryFaceNameW, TRUE))
         {
             RtlFreeUnicodeString(&EntryFaceNameW);
             return FontGDI;
@@ -1032,6 +1682,114 @@ FindFaceNameInLists(PUNICODE_STRING FaceName)
     return Font;
 }
 
+/* See https://msdn.microsoft.com/en-us/library/bb165625(v=vs.90).aspx */
+static BYTE
+CharSetFromLangID(LANGID LangID)
+{
+    /* FIXME: Add more and fix if wrong */
+    switch (PRIMARYLANGID(LangID))
+    {
+        case LANG_CHINESE:
+            switch (SUBLANGID(LangID))
+            {
+                case SUBLANG_CHINESE_TRADITIONAL:
+                    return CHINESEBIG5_CHARSET;
+                case SUBLANG_CHINESE_SIMPLIFIED:
+                default:
+                    break;
+            }
+            return GB2312_CHARSET;
+
+        case LANG_CZECH: case LANG_HUNGARIAN: case LANG_POLISH:
+        case LANG_SLOVAK: case LANG_SLOVENIAN: case LANG_ROMANIAN:
+            return EASTEUROPE_CHARSET;
+
+        case LANG_RUSSIAN: case LANG_BULGARIAN: case LANG_MACEDONIAN:
+        case LANG_SERBIAN: case LANG_UKRAINIAN:
+            return RUSSIAN_CHARSET;
+
+        case LANG_ARABIC:       return ARABIC_CHARSET;
+        case LANG_GREEK:        return GREEK_CHARSET;
+        case LANG_HEBREW:       return HEBREW_CHARSET;
+        case LANG_JAPANESE:     return SHIFTJIS_CHARSET;
+        case LANG_KOREAN:       return JOHAB_CHARSET;
+        case LANG_TURKISH:      return TURKISH_CHARSET;
+        case LANG_THAI:         return THAI_CHARSET;
+        case LANG_LATVIAN:      return BALTIC_CHARSET;
+        case LANG_VIETNAMESE:   return VIETNAMESE_CHARSET;
+
+        case LANG_ENGLISH: case LANG_BASQUE: case LANG_CATALAN:
+        case LANG_DANISH: case LANG_DUTCH: case LANG_FINNISH:
+        case LANG_FRENCH: case LANG_GERMAN: case LANG_ITALIAN:
+        case LANG_NORWEGIAN: case LANG_PORTUGUESE: case LANG_SPANISH:
+        case LANG_SWEDISH: default:
+            return ANSI_CHARSET;
+    }
+}
+
+static void
+SwapEndian(LPVOID pvData, DWORD Size)
+{
+    BYTE b, *pb = pvData;
+    Size /= 2;
+    while (Size-- > 0)
+    {
+        b = pb[0];
+        pb[0] = pb[1];
+        pb[1] = b;
+        ++pb; ++pb;
+    }
+}
+
+static NTSTATUS
+IntGetFontLocalizedName(PUNICODE_STRING pLocalNameW, FT_Face Face)
+{
+    FT_SfntName Name;
+    INT i, Count;
+    WCHAR Buf[LF_FACESIZE];
+    NTSTATUS Status = STATUS_NOT_FOUND;
+
+    RtlInitUnicodeString(pLocalNameW, NULL);
+
+    Count = FT_Get_Sfnt_Name_Count(Face);
+    for (i = 0; i < Count; ++i)
+    {
+        FT_Get_Sfnt_Name(Face, i, &Name);
+        if (Name.platform_id != TT_PLATFORM_MICROSOFT ||
+            Name.encoding_id != TT_MS_ID_UNICODE_CS)
+        {
+            continue;   /* not Microsoft Unicode name */
+        }
+
+        if (Name.name_id != TT_NAME_ID_FONT_FAMILY ||
+            Name.string == NULL || Name.string_len == 0 ||
+            (Name.string[0] == 0 && Name.string[1] == 0))
+        {
+            continue;   /* not family name */
+        }
+
+        if (sizeof(Buf) < Name.string_len + sizeof(UNICODE_NULL))
+        {
+            continue;   /* name too long */
+        }
+
+        /* NOTE: Name.string is not null-terminated */
+        RtlCopyMemory(Buf, Name.string, Name.string_len);
+        Buf[Name.string_len / sizeof(WCHAR)] = UNICODE_NULL;
+
+        /* Convert UTF-16 big endian to little endian */
+        SwapEndian(Buf, Name.string_len);
+#if 0
+        DPRINT("IntGetFontLocalizedName: %S (%d)\n", Buf, Name.string_len);
+#endif
+
+        Status = RtlCreateUnicodeString(pLocalNameW, Buf);
+        break;
+    }
+
+    return Status;
+}
+
 static void FASTCALL
 FontFamilyFillInfo(PFONTFAMILYINFO Info, PCWSTR FaceName, PFONTGDI FontGDI)
 {
@@ -1047,6 +1805,7 @@ FontFamilyFillInfo(PFONTFAMILYINFO Info, PCWSTR FaceName, PFONTGDI FontGDI)
     NEWTEXTMETRICW *Ntm;
     DWORD fs0;
     NTSTATUS status;
+    FT_Face Face = FontGDI->SharedFace->Face;
 
     RtlZeroMemory(Info, sizeof(FONTFAMILYINFO));
     Size = IntGetOutlineTextMetrics(FontGDI, 0, NULL);
@@ -1098,7 +1857,7 @@ FontFamilyFillInfo(PFONTFAMILYINFO Info, PCWSTR FaceName, PFONTGDI FontGDI)
     if (0 == Ntm->ntmFlags) Ntm->ntmFlags = NTM_REGULAR;
 
     Ntm->ntmSizeEM = Otm->otmEMSquare;
-    Ntm->ntmCellHeight = 0;
+    Ntm->ntmCellHeight = Otm->otmEMSquare;
     Ntm->ntmAvgWidth = 0;
 
     Info->FontType = (0 != (TM->tmPitchAndFamily & TMPF_TRUETYPE)
@@ -1109,13 +1868,39 @@ FontFamilyFillInfo(PFONTFAMILYINFO Info, PCWSTR FaceName, PFONTGDI FontGDI)
 
     ExFreePoolWithTag(Otm, GDITAG_TEXT);
 
-    RtlStringCbCopyW(Info->EnumLogFontEx.elfLogFont.lfFaceName,
-                     sizeof(Info->EnumLogFontEx.elfLogFont.lfFaceName),
-                     FaceName);
-    RtlStringCbCopyW(Info->EnumLogFontEx.elfFullName,
-                     sizeof(Info->EnumLogFontEx.elfFullName),
-                     FaceName);
-    RtlInitAnsiString(&StyleA, FontGDI->face->style_name);
+    /* try the localized name */
+    status = STATUS_UNSUCCESSFUL;
+    if (CharSetFromLangID(gusLanguageID) == FontGDI->CharSet)
+    {
+        /* get localized name */
+        UNICODE_STRING LocalNameW;
+        status = IntGetFontLocalizedName(&LocalNameW, Face);
+        if (NT_SUCCESS(status))
+        {
+            /* store it */
+            RtlStringCbCopyW(Info->EnumLogFontEx.elfLogFont.lfFaceName,
+                             sizeof(Info->EnumLogFontEx.elfLogFont.lfFaceName),
+                             LocalNameW.Buffer);
+            RtlStringCbCopyW(Info->EnumLogFontEx.elfFullName,
+                             sizeof(Info->EnumLogFontEx.elfFullName),
+                             LocalNameW.Buffer);
+        }
+        RtlFreeUnicodeString(&LocalNameW);
+    }
+
+    /* if localized name was unavailable */
+    if (!NT_SUCCESS(status))
+    {
+        /* store English name */
+        RtlStringCbCopyW(Info->EnumLogFontEx.elfLogFont.lfFaceName,
+                         sizeof(Info->EnumLogFontEx.elfLogFont.lfFaceName),
+                         FaceName);
+        RtlStringCbCopyW(Info->EnumLogFontEx.elfFullName,
+                         sizeof(Info->EnumLogFontEx.elfFullName),
+                         FaceName);
+    }
+
+    RtlInitAnsiString(&StyleA, Face->style_name);
     StyleW.Buffer = Info->EnumLogFontEx.elfStyle;
     StyleW.MaximumLength = sizeof(Info->EnumLogFontEx.elfStyle);
     status = RtlAnsiStringToUnicodeString(&StyleW, &StyleA, FALSE);
@@ -1123,71 +1908,88 @@ FontFamilyFillInfo(PFONTFAMILYINFO Info, PCWSTR FaceName, PFONTGDI FontGDI)
     {
         return;
     }
+    if (StyleW.Length)
+    {
+        if (wcslen(Info->EnumLogFontEx.elfFullName) +
+            StyleW.Length / sizeof(WCHAR) + 1 <=
+                sizeof(Info->EnumLogFontEx.elfFullName))
+        {
+            wcscat(Info->EnumLogFontEx.elfFullName, L" ");
+            wcscat(Info->EnumLogFontEx.elfFullName, StyleW.Buffer);
+        }
+    }
 
     Info->EnumLogFontEx.elfLogFont.lfCharSet = DEFAULT_CHARSET;
     Info->EnumLogFontEx.elfScript[0] = L'\0';
     IntLockFreeType;
-    pOS2 = FT_Get_Sfnt_Table(FontGDI->face, ft_sfnt_os2);
-    IntUnLockFreeType;
-    if (NULL != pOS2)
+    pOS2 = FT_Get_Sfnt_Table(Face, ft_sfnt_os2);
+
+    if (!pOS2)
     {
-        fs.fsCsb[0] = pOS2->ulCodePageRange1;
-        fs.fsCsb[1] = pOS2->ulCodePageRange2;
-        fs.fsUsb[0] = pOS2->ulUnicodeRange1;
-        fs.fsUsb[1] = pOS2->ulUnicodeRange2;
-        fs.fsUsb[2] = pOS2->ulUnicodeRange3;
-        fs.fsUsb[3] = pOS2->ulUnicodeRange4;
-
-        if (0 == pOS2->version)
-        {
-            FT_UInt Dummy;
-
-            if (FT_Get_First_Char(FontGDI->face, &Dummy) < 0x100)
-                fs.fsCsb[0] |= FS_LATIN1;
-            else
-                fs.fsCsb[0] |= FS_SYMBOL;
-        }
-        if (fs.fsCsb[0] == 0)
-        { /* Let's see if we can find any interesting cmaps */
-            for (i = 0; i < (UINT)FontGDI->face->num_charmaps; i++)
-            {
-                switch (FontGDI->face->charmaps[i]->encoding)
-                {
-                case FT_ENCODING_UNICODE:
-                case FT_ENCODING_APPLE_ROMAN:
-                    fs.fsCsb[0] |= FS_LATIN1;
-                    break;
-                case FT_ENCODING_MS_SYMBOL:
-                    fs.fsCsb[0] |= FS_SYMBOL;
-                    break;
-                default:
-                    break;
-                }
-            }
-        }
-        for (i = 0; i < MAXTCIINDEX; i++)
-        {
-            fs0 = 1L << i;
-            if (fs.fsCsb[0] & fs0)
-            {
-                if (!IntTranslateCharsetInfo(&fs0, &CharSetInfo, TCI_SRCFONTSIG))
-                {
-                    CharSetInfo.ciCharset = DEFAULT_CHARSET;
-                }
-                if (DEFAULT_CHARSET != CharSetInfo.ciCharset)
-                {
-                    Info->EnumLogFontEx.elfLogFont.lfCharSet = CharSetInfo.ciCharset;
-                    if (NULL != ElfScripts[i])
-                        wcscpy(Info->EnumLogFontEx.elfScript, ElfScripts[i]);
-                    else
-                    {
-                        DPRINT1("Unknown elfscript for bit %u\n", i);
-                    }
-                }
-            }
-        }
-        Info->NewTextMetricEx.ntmFontSig = fs;
+        IntUnLockFreeType;
+        return;
     }
+
+    fs.fsCsb[0] = pOS2->ulCodePageRange1;
+    fs.fsCsb[1] = pOS2->ulCodePageRange2;
+    fs.fsUsb[0] = pOS2->ulUnicodeRange1;
+    fs.fsUsb[1] = pOS2->ulUnicodeRange2;
+    fs.fsUsb[2] = pOS2->ulUnicodeRange3;
+    fs.fsUsb[3] = pOS2->ulUnicodeRange4;
+
+    if (0 == pOS2->version)
+    {
+        FT_UInt Dummy;
+
+        if (FT_Get_First_Char(Face, &Dummy) < 0x100)
+            fs.fsCsb[0] |= FS_LATIN1;
+        else
+            fs.fsCsb[0] |= FS_SYMBOL;
+    }
+    IntUnLockFreeType;
+
+    if (fs.fsCsb[0] == 0)
+    {
+        /* Let's see if we can find any interesting cmaps */
+        for (i = 0; i < (UINT)Face->num_charmaps; i++)
+        {
+            switch (Face->charmaps[i]->encoding)
+            {
+            case FT_ENCODING_UNICODE:
+            case FT_ENCODING_APPLE_ROMAN:
+                fs.fsCsb[0] |= FS_LATIN1;
+                break;
+            case FT_ENCODING_MS_SYMBOL:
+                fs.fsCsb[0] |= FS_SYMBOL;
+                break;
+            default:
+                break;
+            }
+        }
+    }
+
+    for (i = 0; i < MAXTCIINDEX; i++)
+    {
+        fs0 = 1L << i;
+        if (fs.fsCsb[0] & fs0)
+        {
+            if (!IntTranslateCharsetInfo(&fs0, &CharSetInfo, TCI_SRCFONTSIG))
+            {
+                CharSetInfo.ciCharset = DEFAULT_CHARSET;
+            }
+            if (DEFAULT_CHARSET != CharSetInfo.ciCharset)
+            {
+                Info->EnumLogFontEx.elfLogFont.lfCharSet = CharSetInfo.ciCharset;
+                if (ElfScripts[i])
+                    wcscpy(Info->EnumLogFontEx.elfScript, ElfScripts[i]);
+                else
+                {
+                    DPRINT1("Unknown elfscript for bit %u\n", i);
+                }
+            }
+        }
+    }
+    Info->NewTextMetricEx.ntmFontSig = fs;
 }
 
 static int FASTCALL
@@ -1199,7 +2001,7 @@ FindFaceNameInInfo(PUNICODE_STRING FaceName, PFONTFAMILYINFO Info, DWORD InfoEnt
     for (i = 0; i < InfoEntries; i++)
     {
         RtlInitUnicodeString(&InfoFaceName, Info[i].EnumLogFontEx.elfLogFont.lfFaceName);
-        if (0 == RtlCompareUnicodeString(&InfoFaceName, FaceName, TRUE))
+        if (RtlEqualUnicodeString(&InfoFaceName, FaceName, TRUE))
         {
             return i;
         }
@@ -1215,8 +2017,8 @@ FontFamilyInclude(LPLOGFONTW LogFont, PUNICODE_STRING FaceName,
     UNICODE_STRING LogFontFaceName;
 
     RtlInitUnicodeString(&LogFontFaceName, LogFont->lfFaceName);
-    if (0 != LogFontFaceName.Length
-            && 0 != RtlCompareUnicodeString(&LogFontFaceName, FaceName, TRUE))
+    if (0 != LogFontFaceName.Length &&
+        !RtlEqualUnicodeString(&LogFontFaceName, FaceName, TRUE))
     {
         return FALSE;
     }
@@ -1246,7 +2048,7 @@ GetFontFamilyInfoForList(LPLOGFONTW LogFont,
         FontGDI = CurrentEntry->Font;
         ASSERT(FontGDI);
 
-        RtlInitAnsiString(&EntryFaceNameA, FontGDI->face->family_name);
+        RtlInitAnsiString(&EntryFaceNameA, FontGDI->SharedFace->Face->family_name);
         status = RtlAnsiStringToUnicodeString(&EntryFaceNameW, &EntryFaceNameA, TRUE);
         if (!NT_SUCCESS(status))
         {
@@ -1441,6 +2243,48 @@ ftGdiGlyphCacheGet(
     RemoveEntryList(CurrentEntry);
     InsertHeadList(&FontCacheListHead, CurrentEntry);
     return FontEntry->BitmapGlyph;
+}
+
+/* no cache */
+FT_BitmapGlyph APIENTRY
+ftGdiGlyphSet(
+    FT_Face Face,
+    FT_GlyphSlot GlyphSlot,
+    FT_Render_Mode RenderMode)
+{
+    FT_Glyph Glyph;
+    INT error;
+    FT_Bitmap AlignedBitmap;
+    FT_BitmapGlyph BitmapGlyph;
+
+    error = FT_Get_Glyph(GlyphSlot, &Glyph);
+    if (error)
+    {
+        DPRINT1("Failure getting glyph.\n");
+        return NULL;
+    }
+
+    error = FT_Glyph_To_Bitmap(&Glyph, RenderMode, 0, 1);
+    if (error)
+    {
+        FT_Done_Glyph(Glyph);
+        DPRINT1("Failure rendering glyph.\n");
+        return NULL;
+    }
+
+    BitmapGlyph = (FT_BitmapGlyph)Glyph;
+    FT_Bitmap_New(&AlignedBitmap);
+    if (FT_Bitmap_Convert(GlyphSlot->library, &BitmapGlyph->bitmap, &AlignedBitmap, 4))
+    {
+        DPRINT1("Conversion failed\n");
+        FT_Done_Glyph((FT_Glyph)BitmapGlyph);
+        return NULL;
+    }
+
+    FT_Bitmap_Done(GlyphSlot->library, &BitmapGlyph->bitmap);
+    BitmapGlyph->bitmap = AlignedBitmap;
+
+    return BitmapGlyph;
 }
 
 FT_BitmapGlyph APIENTRY
@@ -1742,6 +2586,106 @@ static unsigned int get_bezier_glyph_outline(FT_Outline *outline, unsigned int b
     return needed;
 }
 
+static INT
+IntRequestFontSize(PDC dc, FT_Face face, LONG Width, LONG Height)
+{
+    FT_Size_RequestRec  req;
+
+    if (Width < 0)
+        Width = -Width;
+
+    if (Height < 0)
+    {
+        Height = -Height;
+    }
+    if (Height == 0)
+    {
+        Height = dc->ppdev->devinfo.lfDefaultFont.lfHeight;
+    }
+    if (Height == 0)
+    {
+        Height = Width;
+    }
+
+    if (Height < 1)
+        Height = 1;
+
+    if (Width > 0xFFFFU)
+        Width = 0xFFFFU;
+    if (Height > 0xFFFFU)
+        Height = 0xFFFFU;
+
+    req.type           = FT_SIZE_REQUEST_TYPE_NOMINAL;
+    req.width          = (FT_Long)(Width << 6);
+    req.height         = (FT_Long)(Height << 6);
+    req.horiResolution = 0;
+    req.vertResolution = 0;
+    return FT_Request_Size(face, &req);
+}
+
+BOOL
+FASTCALL
+TextIntUpdateSize(PDC dc,
+                  PTEXTOBJ TextObj,
+                  PFONTGDI FontGDI,
+                  BOOL bDoLock)
+{
+    FT_Face face;
+    INT error, n;
+    FT_CharMap charmap, found;
+    LOGFONTW *plf;
+
+    if (bDoLock)
+        IntLockFreeType;
+
+    face = FontGDI->SharedFace->Face;
+    if (face->charmap == NULL)
+    {
+        DPRINT("WARNING: No charmap selected!\n");
+        DPRINT("This font face has %d charmaps\n", face->num_charmaps);
+
+        found = NULL;
+        for (n = 0; n < face->num_charmaps; n++)
+        {
+            charmap = face->charmaps[n];
+            DPRINT("Found charmap encoding: %i\n", charmap->encoding);
+            if (charmap->encoding != 0)
+            {
+                found = charmap;
+                break;
+            }
+        }
+        if (!found)
+        {
+            DPRINT1("WARNING: Could not find desired charmap!\n");
+        }
+        else
+        {
+            error = FT_Set_Charmap(face, found);
+            if (error)
+            {
+                DPRINT1("WARNING: Could not set the charmap!\n");
+            }
+        }
+    }
+
+    plf = &TextObj->logfont.elfEnumLogfontEx.elfLogFont;
+
+    error = IntRequestFontSize(dc, face, plf->lfWidth, plf->lfHeight);
+
+    if (bDoLock)
+        IntUnLockFreeType;
+
+    if (error)
+    {
+        DPRINT1("Error in setting pixel sizes: %d\n", error);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+
 /*
  * Based on WineEngGetGlyphOutline
  *
@@ -1780,9 +2724,8 @@ ftGdiGetGlyphOutline(
     LONG aveWidth;
     INT adv, lsb, bbx; /* These three hold to widths of the unrotated chars */
     OUTLINETEXTMETRICW *potm;
-    int n = 0;
-    FT_CharMap found = 0, charmap;
     XFORM xForm;
+    LOGFONTW *plf;
 
     DPRINT("%u, %08x, %p, %08lx, %p, %p\n", wch, iFormat, pgm,
            cjBuf, pvBuf, pmat2);
@@ -1801,10 +2744,11 @@ ftGdiGetGlyphOutline(
         return GDI_ERROR;
     }
     FontGDI = ObjToGDI(TextObj->Font, FONT);
-    ft_face = FontGDI->face;
+    ft_face = FontGDI->SharedFace->Face;
 
-    aveWidth = FT_IS_SCALABLE(ft_face) ? TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfWidth: 0;
-    orientation = FT_IS_SCALABLE(ft_face) ? TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfOrientation: 0;
+    plf = &TextObj->logfont.elfEnumLogfontEx.elfLogFont;
+    aveWidth = FT_IS_SCALABLE(ft_face) ? abs(plf->lfWidth) : 0;
+    orientation = FT_IS_SCALABLE(ft_face) ? plf->lfOrientation : 0;
 
     Size = IntGetOutlineTextMetrics(FontGDI, 0, NULL);
     potm = ExAllocatePoolWithTag(PagedPool, Size, GDITAG_TEXT);
@@ -1817,39 +2761,7 @@ ftGdiGetGlyphOutline(
     IntGetOutlineTextMetrics(FontGDI, Size, potm);
 
     IntLockFreeType;
-
-    /* During testing, I never saw this used. It is here just in case. */
-    if (ft_face->charmap == NULL)
-    {
-        DPRINT("WARNING: No charmap selected!\n");
-        DPRINT("This font face has %d charmaps\n", ft_face->num_charmaps);
-
-        for (n = 0; n < ft_face->num_charmaps; n++)
-        {
-            charmap = ft_face->charmaps[n];
-            DPRINT("Found charmap encoding: %i\n", charmap->encoding);
-            if (charmap->encoding != 0)
-            {
-                found = charmap;
-                break;
-            }
-        }
-        if (!found)
-        {
-            DPRINT1("WARNING: Could not find desired charmap!\n");
-        }
-        error = FT_Set_Charmap(ft_face, found);
-        if (error)
-        {
-            DPRINT1("WARNING: Could not set the charmap!\n");
-        }
-    }
-
-    FT_Set_Pixel_Sizes(ft_face,
-                       abs(TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfWidth),
-    /* FIXME: Should set character height if neg */
-                       (TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight == 0 ?
-                        dc->ppdev->devinfo.lfDefaultFont.lfHeight : abs(TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight)));
+    TextIntUpdateSize(dc, TextObj, FontGDI, FALSE);
     FtSetCoordinateTransform(ft_face, DC_pmxWorldToDevice(dc));
 
     TEXTOBJ_UnlockText(TextObj);
@@ -1925,19 +2837,6 @@ ftGdiGetGlyphOutline(
         ftmatrix.yy = FLOATOBJ_GetLong(&efTemp);
 
         FT_Matrix_Multiply(&ftmatrix, &transMat);
-        needsTransform = TRUE;
-    }
-
-    /* Slant transform */
-    if (potm->otmTextMetrics.tmItalic)
-    {
-        FT_Matrix slantMat;
-        DPRINT("Slant Trans!\n");
-        slantMat.xx = (1 << 16);
-        slantMat.xy = ((1 << 16) >> 2);
-        slantMat.yx = 0;
-        slantMat.yy = (1 << 16);
-        FT_Matrix_Multiply(&slantMat, &transMat);
         needsTransform = TRUE;
     }
 
@@ -2080,7 +2979,7 @@ ftGdiGetGlyphOutline(
             ft_bitmap.width = width;
             ft_bitmap.rows = height;
             ft_bitmap.pitch = pitch;
-            ft_bitmap.pixel_mode = ft_pixel_mode_mono;
+            ft_bitmap.pixel_mode = FT_PIXEL_MODE_MONO;
             ft_bitmap.buffer = pvBuf;
 
             IntLockFreeType;
@@ -2144,7 +3043,7 @@ ftGdiGetGlyphOutline(
             ft_bitmap.width = width;
             ft_bitmap.rows = height;
             ft_bitmap.pitch = pitch;
-            ft_bitmap.pixel_mode = ft_pixel_mode_grays;
+            ft_bitmap.pixel_mode = FT_PIXEL_MODE_GRAY;
             ft_bitmap.buffer = pvBuf;
 
             IntLockFreeType;
@@ -2260,66 +3159,37 @@ TextIntGetTextExtentPoint(PDC dc,
     FT_Face face;
     FT_GlyphSlot glyph;
     FT_BitmapGlyph realglyph;
-    INT error, n, glyph_index, i, previous;
+    INT error, glyph_index, i, previous;
     ULONGLONG TotalWidth = 0;
-    FT_CharMap charmap, found = NULL;
     BOOL use_kerning;
     FT_Render_Mode RenderMode;
     BOOLEAN Render;
     PMATRIX pmxWorldToDevice;
+    LOGFONTW *plf;
+    BOOL EmuBold, EmuItalic;
 
     FontGDI = ObjToGDI(TextObj->Font, FONT);
 
-    face = FontGDI->face;
+    face = FontGDI->SharedFace->Face;
     if (NULL != Fit)
     {
         *Fit = 0;
     }
 
     IntLockFreeType;
-    if (face->charmap == NULL)
-    {
-        DPRINT("WARNING: No charmap selected!\n");
-        DPRINT("This font face has %d charmaps\n", face->num_charmaps);
 
-        for (n = 0; n < face->num_charmaps; n++)
-        {
-            charmap = face->charmaps[n];
-            DPRINT("Found charmap encoding: %i\n", charmap->encoding);
-            if (charmap->encoding != 0)
-            {
-                found = charmap;
-                break;
-            }
-        }
+    TextIntUpdateSize(dc, TextObj, FontGDI, FALSE);
 
-        if (! found)
-        {
-            DPRINT1("WARNING: Could not find desired charmap!\n");
-        }
-
-        error = FT_Set_Charmap(face, found);
-        if (error)
-        {
-            DPRINT1("WARNING: Could not set the charmap!\n");
-        }
-    }
+    plf = &TextObj->logfont.elfEnumLogfontEx.elfLogFont;
+    EmuBold = (plf->lfWeight >= FW_BOLD && FontGDI->OriginalWeight <= FW_NORMAL);
+    EmuItalic = (plf->lfItalic && !FontGDI->OriginalItalic);
 
     Render = IntIsFontRenderingEnabled();
     if (Render)
-        RenderMode = IntGetFontRenderMode(&TextObj->logfont.elfEnumLogfontEx.elfLogFont);
+        RenderMode = IntGetFontRenderMode(plf);
     else
         RenderMode = FT_RENDER_MODE_MONO;
 
-    error = FT_Set_Pixel_Sizes(face,
-                               TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfWidth,
-                               /* FIXME: Should set character height if neg */
-                               (TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight == 0 ?
-							   dc->ppdev->devinfo.lfDefaultFont.lfHeight : abs(TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight)));
-    if (error)
-    {
-        DPRINT1("Error in setting pixel sizes: %d\n", error);
-    }
 
     /* Get the DC's world-to-device transformation matrix */
     pmxWorldToDevice = DC_pmxWorldToDevice(dc);
@@ -2335,9 +3205,13 @@ TextIntGetTextExtentPoint(PDC dc,
         else
             glyph_index = FT_Get_Char_Index(face, *String);
 
-        if (!(realglyph = ftGdiGlyphCacheGet(face, glyph_index,
-                                             TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight,
-                                             pmxWorldToDevice)))
+        if (EmuBold || EmuItalic)
+            realglyph = NULL;
+        else
+            realglyph = ftGdiGlyphCacheGet(face, glyph_index,
+                                           plf->lfHeight, pmxWorldToDevice);
+
+        if (EmuBold || EmuItalic || !realglyph)
         {
             error = FT_Load_Glyph(face, glyph_index, FT_LOAD_DEFAULT);
             if (error)
@@ -2347,12 +3221,24 @@ TextIntGetTextExtentPoint(PDC dc,
             }
 
             glyph = face->glyph;
-            realglyph = ftGdiGlyphCacheSet(face,
-                                           glyph_index,
-                                           TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight,
-                                           pmxWorldToDevice,
-                                           glyph,
-                                           RenderMode);
+            if (EmuBold || EmuItalic)
+            {
+                if (EmuBold)
+                    FT_GlyphSlot_Embolden(glyph);
+                if (EmuItalic)
+                    FT_GlyphSlot_Oblique(glyph);
+                realglyph = ftGdiGlyphSet(face, glyph, RenderMode);
+            }
+            else
+            {
+                realglyph = ftGdiGlyphCacheSet(face,
+                                               glyph_index,
+                                               plf->lfHeight,
+                                               pmxWorldToDevice,
+                                               glyph,
+                                               RenderMode);
+            }
+
             if (!realglyph)
             {
                 DPRINT1("Failed to render glyph! [index: %d]\n", glyph_index);
@@ -2379,14 +3265,21 @@ TextIntGetTextExtentPoint(PDC dc,
             Dx[i] = (TotalWidth + 32) >> 6;
         }
 
+        if (EmuBold || EmuItalic)
+        {
+            FT_Done_Glyph((FT_Glyph)realglyph);
+            realglyph = NULL;
+        }
+
         previous = glyph_index;
         String++;
     }
     IntUnLockFreeType;
 
     Size->cx = (TotalWidth + 32) >> 6;
-    Size->cy = (TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight == 0 ?
-	            dc->ppdev->devinfo.lfDefaultFont.lfHeight : abs(TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight));
+    Size->cy = (plf->lfHeight == 0 ?
+                dc->ppdev->devinfo.lfDefaultFont.lfHeight :
+                abs(plf->lfHeight));
     Size->cy = EngMulDiv(Size->cy, dc->ppdev->gdiinfo.ulLogPixelsY, 72);
 
     return TRUE;
@@ -2423,7 +3316,7 @@ ftGdiGetTextCharsetInfo(
         return Ret;
     }
     FontGdi = ObjToGDI(TextObj->Font, FONT);
-    Face = FontGdi->face;
+    Face = FontGdi->SharedFace->Face;
     TEXTOBJ_UnlockText(TextObj);
 
     IntLockFreeType;
@@ -2511,7 +3404,7 @@ ftGetFontUnicodeRanges(PFONTGDI Font, PGLYPHSET glyphset)
 {
     DWORD size = 0;
     DWORD num_ranges = 0;
-    FT_Face face = Font->face;
+    FT_Face face = Font->SharedFace->Face;
 
     if (face->charmap->encoding == FT_ENCODING_UNICODE)
     {
@@ -2589,6 +3482,7 @@ ftGdiGetTextMetricsW(
     FT_WinFNT_HeaderRec Win;
     ULONG Error;
     NTSTATUS Status = STATUS_SUCCESS;
+    LOGFONTW *plf;
 
     if (!ptmwi)
     {
@@ -2605,15 +3499,12 @@ ftGdiGetTextMetricsW(
     TextObj = RealizeFontInit(pdcattr->hlfntNew);
     if (NULL != TextObj)
     {
+        plf = &TextObj->logfont.elfEnumLogfontEx.elfLogFont;
         FontGDI = ObjToGDI(TextObj->Font, FONT);
 
-        Face = FontGDI->face;
+        Face = FontGDI->SharedFace->Face;
         IntLockFreeType;
-        Error = FT_Set_Pixel_Sizes(Face,
-                                   TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfWidth,
-                                   /* FIXME: Should set character height if neg */
-                                   (TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight == 0 ?
-                                   dc->ppdev->devinfo.lfDefaultFont.lfHeight : abs(TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight)));
+        Error = IntRequestFontSize(dc, Face, plf->lfWidth, plf->lfHeight);
         FtSetCoordinateTransform(Face, DC_pmxWorldToDevice(dc));
         IntUnLockFreeType;
         if (0 != Error)
@@ -2623,24 +3514,25 @@ ftGdiGetTextMetricsW(
         }
         else
         {
+            FT_Face Face = FontGDI->SharedFace->Face;
             Status = STATUS_SUCCESS;
 
             IntLockFreeType;
-            pOS2 = FT_Get_Sfnt_Table(FontGDI->face, ft_sfnt_os2);
+            pOS2 = FT_Get_Sfnt_Table(Face, ft_sfnt_os2);
             if (NULL == pOS2)
             {
                 DPRINT1("Can't find OS/2 table - not TT font?\n");
                 Status = STATUS_INTERNAL_ERROR;
             }
 
-            pHori = FT_Get_Sfnt_Table(FontGDI->face, ft_sfnt_hhea);
+            pHori = FT_Get_Sfnt_Table(Face, ft_sfnt_hhea);
             if (NULL == pHori)
             {
                 DPRINT1("Can't find HHEA table - not TT font?\n");
                 Status = STATUS_INTERNAL_ERROR;
             }
 
-            Error = FT_Get_WinFNT_Header(FontGDI->face , &Win);
+            Error = FT_Get_WinFNT_Header(Face, &Win);
 
             IntUnLockFreeType;
 
@@ -2668,7 +3560,6 @@ ftGdiGetTextMetricsW(
     return TRUE;
 }
 
-
 DWORD
 FASTCALL
 ftGdiGetFontData(
@@ -2679,10 +3570,11 @@ ftGdiGetFontData(
     DWORD Size)
 {
     DWORD Result = GDI_ERROR;
+    FT_Face Face = FontGdi->SharedFace->Face;
 
     IntLockFreeType;
 
-    if (FT_IS_SFNT(FontGdi->face))
+    if (FT_IS_SFNT(Face))
     {
         if (Table)
             Table = Table >> 24 | Table << 24 | (Table >> 8 & 0xFF00) |
@@ -2695,11 +3587,11 @@ ftGdiGetFontData(
             FT_Error Error;
             FT_ULong Needed = 0;
 
-            Error = FT_Load_Sfnt_Table(FontGdi->face, Table, Offset, NULL, &Needed);
+            Error = FT_Load_Sfnt_Table(Face, Table, Offset, NULL, &Needed);
 
             if ( !Error && Needed < Size) Size = Needed;
         }
-        if (!FT_Load_Sfnt_Table(FontGdi->face, Table, Offset, Buffer, &Size))
+        if (!FT_Load_Sfnt_Table(Face, Table, Offset, Buffer, &Size))
             Result = Size;
     }
 
@@ -2708,170 +3600,480 @@ ftGdiGetFontData(
     return Result;
 }
 
+// NOTE: See Table 1. of https://msdn.microsoft.com/en-us/library/ms969909.aspx
 static UINT FASTCALL
-GetFontScore(LOGFONTW *LogFont, PUNICODE_STRING FaceName, PFONTGDI FontGDI)
+GetFontPenalty(LOGFONTW *               LogFont,
+               PUNICODE_STRING          RequestedNameW,
+               PUNICODE_STRING          ActualNameW,
+               PUNICODE_STRING          FullFaceNameW,
+               BYTE                     RequestedCharSet,
+               PFONTGDI                 FontGDI,
+               OUTLINETEXTMETRICW *     Otm,
+               TEXTMETRICW *            TM,
+               const char *             style_name)
 {
-    ANSI_STRING EntryFaceNameA;
-    UNICODE_STRING EntryFaceNameW;
-    unsigned Size;
-    OUTLINETEXTMETRICW *Otm;
-    LONG WeightDiff;
-    NTSTATUS Status;
-    UINT Score = 1;
+    ULONG   Penalty = 0;
+    BYTE    Byte;
+    LONG    Long;
+    BOOL    fFixedSys = FALSE, fNeedScaling = FALSE;
+    const BYTE UserCharSet = CharSetFromLangID(gusLanguageID);
 
-    RtlInitAnsiString(&EntryFaceNameA, FontGDI->face->family_name);
-    Status = RtlAnsiStringToUnicodeString(&EntryFaceNameW, &EntryFaceNameA, TRUE);
-    if (NT_SUCCESS(Status))
+    /* FIXME: Aspect Penalty 30 */
+    /* FIXME: IntSizeSynth Penalty 20 */
+    /* FIXME: SmallPenalty Penalty 1 */
+    /* FIXME: FaceNameSubst Penalty 500 */
+
+    if (RtlEqualUnicodeString(RequestedNameW, &SystemW, TRUE))
     {
-        static const UNICODE_STRING MarlettFaceNameW = RTL_CONSTANT_STRING(L"Marlett");
-        static const UNICODE_STRING SymbolFaceNameW = RTL_CONSTANT_STRING(L"Symbol");
-        static const UNICODE_STRING VGAFaceNameW = RTL_CONSTANT_STRING(L"VGA");
-
-        if ((LF_FACESIZE - 1) * sizeof(WCHAR) < EntryFaceNameW.Length)
+        /* "System" font */
+        if (TM->tmCharSet != UserCharSet)
         {
-            EntryFaceNameW.Length = (LF_FACESIZE - 1) * sizeof(WCHAR);
-            EntryFaceNameW.Buffer[LF_FACESIZE - 1] = L'\0';
+            /* CharSet Penalty 65000 */
+            /* Requested charset does not match the candidate's. */
+            Penalty += 65000;
+        }
+    }
+    else if (RtlEqualUnicodeString(RequestedNameW, &FixedSysW, TRUE))
+    {
+        /* "FixedSys" font */
+        if (TM->tmCharSet != UserCharSet)
+        {
+            /* CharSet Penalty 65000 */
+            /* Requested charset does not match the candidate's. */
+            Penalty += 65000;
+        }
+        fFixedSys = TRUE;
+    }
+    else    /* Request is non-"System" font */
+    {
+        Byte = RequestedCharSet;
+        if (Byte == DEFAULT_CHARSET)
+        {
+            if (RtlEqualUnicodeString(RequestedNameW, &MarlettW, TRUE))
+            {
+                if (Byte == ANSI_CHARSET)
+                {
+                    DPRINT("Warning: FIXME: It's Marlett but ANSI_CHARSET.\n");
+                }
+                /* We assume SYMBOL_CHARSET for "Marlett" font */
+                Byte = SYMBOL_CHARSET;
+            }
         }
 
-        if (!RtlCompareUnicodeString(FaceName, &EntryFaceNameW, TRUE))
+        if (Byte != TM->tmCharSet)
         {
-            Score += 49;
+            if (Byte != DEFAULT_CHARSET && Byte != ANSI_CHARSET)
+            {
+                /* CharSet Penalty 65000 */
+                /* Requested charset does not match the candidate's. */
+                Penalty += 65000;
+            }
+            else
+            {
+                if (UserCharSet != TM->tmCharSet)
+                {
+                    /* UNDOCUMENTED */
+                    Penalty += 100;
+                    if (ANSI_CHARSET != TM->tmCharSet)
+                    {
+                        /* UNDOCUMENTED */
+                        Penalty += 100;
+                    }
+                }
+            }
         }
-
-        /* FIXME: this is a work around to counter weird fonts on weird places.
-           A proper fix would be to score fonts on more attributes than
-           the ones in this function */
-        if (!RtlCompareUnicodeString(&MarlettFaceNameW, &EntryFaceNameW, TRUE) &&
-            RtlCompareUnicodeString(&MarlettFaceNameW, FaceName, TRUE))
-        {
-            Score = 0;
-        }
-
-        if (!RtlCompareUnicodeString(&SymbolFaceNameW, &EntryFaceNameW, TRUE) &&
-            RtlCompareUnicodeString(&SymbolFaceNameW, FaceName, TRUE))
-        {
-            Score = 0;
-        }
-
-        if (!RtlCompareUnicodeString(&VGAFaceNameW, &EntryFaceNameW, TRUE) &&
-            RtlCompareUnicodeString(&VGAFaceNameW, FaceName, TRUE))
-        {
-            Score = 0;
-        }
-
-        RtlFreeUnicodeString(&EntryFaceNameW);
     }
 
-    Size = IntGetOutlineTextMetrics(FontGDI, 0, NULL);
-    Otm = ExAllocatePoolWithTag(PagedPool, Size, GDITAG_TEXT);
-    if (NULL == Otm)
+    Byte = LogFont->lfOutPrecision;
+    if (Byte == OUT_DEFAULT_PRECIS)
+        Byte = OUT_OUTLINE_PRECIS;  /* Is it OK? */
+    switch (Byte)
     {
-        return Score;
+        case OUT_DEVICE_PRECIS:
+            if (!(TM->tmPitchAndFamily & TMPF_DEVICE) ||
+                !(TM->tmPitchAndFamily & (TMPF_VECTOR | TMPF_TRUETYPE)))
+            {
+                /* OutputPrecision Penalty 19000 */
+                /* Requested OUT_STROKE_PRECIS, but the device can't do it
+                   or the candidate is not a vector font. */
+                Penalty += 19000;
+            }
+            break;
+        default:
+            if (TM->tmPitchAndFamily & (TMPF_VECTOR | TMPF_TRUETYPE))
+            {
+                /* OutputPrecision Penalty 19000 */
+                /* Or OUT_STROKE_PRECIS not requested, and the candidate
+                   is a vector font that requires GDI support. */
+                Penalty += 19000;
+            }
+            break;
     }
-    IntGetOutlineTextMetrics(FontGDI, Size, Otm);
 
-    if ((0 != LogFont->lfItalic && 0 != Otm->otmTextMetrics.tmItalic) ||
-            (0 == LogFont->lfItalic && 0 == Otm->otmTextMetrics.tmItalic))
+    Byte = (LogFont->lfPitchAndFamily & 0x0F);
+    if (Byte == DEFAULT_PITCH)
+        Byte = VARIABLE_PITCH;
+    if (fFixedSys)
     {
-        Score += 25;
+        /* "FixedSys" font should be fixed-pitch */
+        Byte = FIXED_PITCH;
     }
-    if (LogFont->lfWeight != FW_DONTCARE)
+    if (Byte == FIXED_PITCH)
     {
-        if (LogFont->lfWeight < Otm->otmTextMetrics.tmWeight)
+        if (TM->tmPitchAndFamily & _TMPF_VARIABLE_PITCH)
         {
-            WeightDiff = Otm->otmTextMetrics.tmWeight - LogFont->lfWeight;
+            /* FixedPitch Penalty 15000 */
+            /* Requested a fixed pitch font, but the candidate is a
+               variable pitch font. */
+            Penalty += 15000;
+        }
+    }
+    if (Byte == VARIABLE_PITCH)
+    {
+        if (!(TM->tmPitchAndFamily & _TMPF_VARIABLE_PITCH))
+        {
+            /* PitchVariable Penalty 350 */
+            /* Requested a variable pitch font, but the candidate is not a
+               variable pitch font. */
+            Penalty += 350;
+        }
+    }
+
+    Byte = (LogFont->lfPitchAndFamily & 0x0F);
+    if (Byte == DEFAULT_PITCH)
+    {
+        if (!(TM->tmPitchAndFamily & _TMPF_VARIABLE_PITCH))
+        {
+            /* DefaultPitchFixed Penalty 1 */
+            /* Requested DEFAULT_PITCH, but the candidate is fixed pitch. */
+            Penalty += 1;
+        }
+    }
+
+    if (RequestedNameW->Buffer[0])
+    {
+        if (RtlEqualUnicodeString(RequestedNameW, FullFaceNameW, TRUE))
+        {
+            /* matched with full face name */
+        }
+        else if (RtlEqualUnicodeString(RequestedNameW, ActualNameW, TRUE))
+        {
+            /* matched with actual name */
         }
         else
         {
-            WeightDiff = LogFont->lfWeight - Otm->otmTextMetrics.tmWeight;
+            /* try the localized name */
+            UNICODE_STRING LocalNameW;
+            FT_Face Face = FontGDI->SharedFace->Face;
+            IntGetFontLocalizedName(&LocalNameW, Face);
+            if (RtlEqualUnicodeString(RequestedNameW, &LocalNameW, TRUE))
+            {
+                /* matched with localizied name */
+            }
+            else
+            {
+                /* FaceName Penalty 10000 */
+                /* Requested a face name, but the candidate's face name
+                   does not match. */
+                Penalty += 10000;
+            }
+            RtlFreeUnicodeString(&LocalNameW);
         }
-        Score += (1000 - WeightDiff) / (1000 / 25);
     }
-    else
+
+    Byte = (LogFont->lfPitchAndFamily & 0xF0);
+    if (Byte != FF_DONTCARE)
     {
-        Score += 25;
+        if (Byte != (TM->tmPitchAndFamily & 0xF0))
+        {
+            /* Family Penalty 9000 */
+            /* Requested a family, but the candidate's family is different. */
+            Penalty += 9000;
+        }
+        if ((TM->tmPitchAndFamily & 0xF0) == FF_DONTCARE)
+        {
+            /* FamilyUnknown Penalty 8000 */
+            /* Requested a family, but the candidate has no family. */
+            Penalty += 8000;
+        }
     }
 
-    ExFreePoolWithTag(Otm, GDITAG_TEXT);
+    /* Is the candidate a non-vector font? */
+    if (!(TM->tmPitchAndFamily & (TMPF_TRUETYPE | TMPF_VECTOR)))
+    {
+        /* Is lfHeight specified? */
+        if (LogFont->lfHeight != 0)
+        {
+            if (labs(LogFont->lfHeight) < TM->tmHeight)
+            {
+                /* HeightBigger Penalty 600 */
+                /* The candidate is a nonvector font and is bigger than the
+                   requested height. */
+                Penalty += 600;
+                /* HeightBiggerDifference Penalty 150 */
+                /* The candidate is a raster font and is larger than the
+                   requested height. Penalty * height difference */
+                Penalty += 150 * labs(TM->tmHeight - labs(LogFont->lfHeight));
 
-    return Score;
+                fNeedScaling = TRUE;
+            }
+            if (TM->tmHeight < labs(LogFont->lfHeight))
+            {
+                /* HeightSmaller Penalty 150 */
+                /* The candidate is a raster font and is smaller than the
+                   requested height. Penalty * height difference */
+                Penalty += 150 * labs(TM->tmHeight - labs(LogFont->lfHeight));
+
+                fNeedScaling = TRUE;
+            }
+        }
+    }
+
+    switch (LogFont->lfPitchAndFamily & 0xF0)
+    {
+        case FF_ROMAN: case FF_MODERN: case FF_SWISS:
+            switch (TM->tmPitchAndFamily & 0xF0)
+            {
+                case FF_DECORATIVE: case FF_SCRIPT:
+                    /* FamilyUnlikely Penalty 50 */
+                    /* Requested a roman/modern/swiss family, but the
+                       candidate is decorative/script. */
+                    Penalty += 50;
+                    break;
+                default:
+                    break;
+            }
+            break;
+        case FF_DECORATIVE: case FF_SCRIPT:
+            switch (TM->tmPitchAndFamily & 0xF0)
+            {
+                case FF_ROMAN: case FF_MODERN: case FF_SWISS:
+                    /* FamilyUnlikely Penalty 50 */
+                    /* Or requested decorative/script, and the candidate is
+                       roman/modern/swiss. */
+                    Penalty += 50;
+                    break;
+                default:
+                    break;
+            }
+        default:
+            break;
+    }
+
+    if (LogFont->lfWidth != 0)
+    {
+        if (LogFont->lfWidth != TM->tmAveCharWidth)
+        {
+            /* Width Penalty 50 */
+            /* Requested a nonzero width, but the candidate's width
+               doesn't match. Penalty * width difference */
+            Penalty += 50 * labs(LogFont->lfWidth - TM->tmAveCharWidth);
+
+            if (!(TM->tmPitchAndFamily & (TMPF_TRUETYPE | TMPF_VECTOR)))
+                fNeedScaling = TRUE;
+        }
+    }
+
+    if (fNeedScaling)
+    {
+        /* SizeSynth Penalty 50 */
+        /* The candidate is a raster font that needs scaling by GDI. */
+        Penalty += 50;
+    }
+
+    if (!!LogFont->lfItalic != !!TM->tmItalic)
+    {
+        if (!LogFont->lfItalic && ItalicFromStyle(style_name))
+        {
+            /* Italic Penalty 4 */
+            /* Requested font and candidate font do not agree on italic status,
+               and the desired result cannot be simulated. */
+            /* Adjusted to 40 to satisfy (Oblique Penalty > Book Penalty). */
+            Penalty += 40;
+        }
+        else if (LogFont->lfItalic && !ItalicFromStyle(style_name))
+        {
+            /* ItalicSim Penalty 1 */
+            /* Requested italic font but the candidate is not italic,
+               although italics can be simulated. */
+            Penalty += 1;
+        }
+    }
+
+    if (LogFont->lfOutPrecision == OUT_TT_PRECIS)
+    {
+        if (!(TM->tmPitchAndFamily & TMPF_TRUETYPE))
+        {
+            /* NotTrueType Penalty 4 */
+            /* Requested OUT_TT_PRECIS, but the candidate is not a
+               TrueType font. */
+            Penalty += 4;
+        }
+    }
+
+    Long = LogFont->lfWeight;
+    if (LogFont->lfWeight == FW_DONTCARE)
+        Long = FW_NORMAL;
+    if (Long != TM->tmWeight)
+    {
+        /* Weight Penalty 3 */
+        /* The candidate's weight does not match the requested weight. 
+           Penalty * (weight difference/10) */
+        Penalty += 3 * (labs(Long - TM->tmWeight) / 10);
+    }
+
+    if (!LogFont->lfUnderline && TM->tmUnderlined)
+    {
+        /* Underline Penalty 3 */
+        /* Requested font has no underline, but the candidate is
+           underlined. */
+        Penalty += 3;
+    }
+
+    if (!LogFont->lfStrikeOut && TM->tmStruckOut)
+    {
+        /* StrikeOut Penalty 3 */
+        /* Requested font has no strike-out, but the candidate is
+           struck out. */
+        Penalty += 3;
+    }
+
+    /* Is the candidate a non-vector font? */
+    if (!(TM->tmPitchAndFamily & (TMPF_TRUETYPE | TMPF_VECTOR)))
+    {
+        if (LogFont->lfHeight != 0 && TM->tmHeight < LogFont->lfHeight)
+        {
+            /* VectorHeightSmaller Penalty 2 */
+            /* Candidate is a vector font that is smaller than the
+               requested height. Penalty * height difference */
+            Penalty += 2 * labs(TM->tmHeight - LogFont->lfHeight);
+        }
+        if (LogFont->lfHeight != 0 && TM->tmHeight > LogFont->lfHeight)
+        {
+            /* VectorHeightBigger Penalty 1 */
+            /* Candidate is a vector font that is bigger than the
+               requested height. Penalty * height difference */
+            Penalty += 1 * labs(TM->tmHeight - LogFont->lfHeight);
+        }
+    }
+
+    if (!(TM->tmPitchAndFamily & TMPF_DEVICE))
+    {
+        /* DeviceFavor Penalty 2 */
+        /* Extra penalty for all nondevice fonts. */
+        Penalty += 2;
+    }
+
+    if (Penalty < 200)
+    {
+        DPRINT("WARNING: Penalty:%ld < 200: RequestedNameW:%ls, "
+            "ActualNameW:%ls, lfCharSet:%d, lfWeight:%ld, "
+            "tmCharSet:%d, tmWeight:%ld\n",
+            Penalty, RequestedNameW->Buffer, ActualNameW->Buffer,
+            LogFont->lfCharSet, LogFont->lfWeight,
+            TM->tmCharSet, TM->tmWeight);
+    }
+
+    return Penalty;     /* success */
 }
 
 static __inline VOID
-FindBestFontFromList(FONTOBJ **FontObj, UINT *MatchScore, LOGFONTW *LogFont,
-                     PUNICODE_STRING FaceName, PLIST_ENTRY Head)
+FindBestFontFromList(FONTOBJ **FontObj, ULONG *MatchPenalty, LOGFONTW *LogFont,
+                     PUNICODE_STRING pRequestedNameW,
+                     PUNICODE_STRING pActualNameW, BYTE RequestedCharSet,
+                     PLIST_ENTRY Head)
 {
+    ULONG Penalty;
+    NTSTATUS Status;
     PLIST_ENTRY Entry;
     PFONT_ENTRY CurrentEntry;
     FONTGDI *FontGDI;
-    UINT Score;
-ASSERT(FontObj && MatchScore && LogFont && FaceName && Head);
+    ANSI_STRING ActualNameA;
+    UNICODE_STRING ActualNameW, FullFaceNameW;
+    OUTLINETEXTMETRICW *Otm = NULL;
+    UINT OtmSize, OldOtmSize = 0;
+    TEXTMETRICW *TM;
+    FT_Face Face;
+    LPBYTE pb;
+
+    ASSERT(FontObj);
+    ASSERT(MatchPenalty);
+    ASSERT(LogFont);
+    ASSERT(pRequestedNameW);
+    ASSERT(Head);
+
+    /* get the FontObj of lowest penalty */
     Entry = Head->Flink;
     while (Entry != Head)
     {
         CurrentEntry = (PFONT_ENTRY) CONTAINING_RECORD(Entry, FONT_ENTRY, ListEntry);
-
         FontGDI = CurrentEntry->Font;
         ASSERT(FontGDI);
+        Face = FontGDI->SharedFace->Face;
 
-        Score = GetFontScore(LogFont, FaceName, FontGDI);
-        if (*MatchScore == 0 || *MatchScore < Score)
+        /* create actual name */
+        RtlInitAnsiString(&ActualNameA, Face->family_name);
+        Status = RtlAnsiStringToUnicodeString(&ActualNameW, &ActualNameA, TRUE);
+        if (!NT_SUCCESS(Status))
         {
-            *FontObj = GDIToObj(FontGDI, FONT);
-            *MatchScore = Score;
+            /* next entry */
+            Entry = Entry->Flink;
+            continue;
         }
+
+        /* get text metrics */
+        OtmSize = IntGetOutlineTextMetrics(FontGDI, 0, NULL);
+        if (OtmSize > OldOtmSize)
+        {
+            if (Otm)
+                ExFreePoolWithTag(Otm, GDITAG_TEXT);
+            Otm = ExAllocatePoolWithTag(PagedPool, OtmSize, GDITAG_TEXT);
+        }
+
+        /* update FontObj if lowest penalty */
+        if (Otm)
+        {
+            IntGetOutlineTextMetrics(FontGDI, OtmSize, Otm);
+            TM = &Otm->otmTextMetrics;
+            OldOtmSize = OtmSize;
+
+            /* create full name */
+            pb = (LPBYTE)Otm + (WORD)(DWORD_PTR)Otm->otmpFullName;
+            Status = RtlCreateUnicodeString(&FullFaceNameW, (LPWSTR)pb);
+            if (!NT_SUCCESS(Status))
+            {
+                RtlFreeUnicodeString(&ActualNameW);
+                RtlFreeUnicodeString(&FullFaceNameW);
+                /* next entry */
+                Entry = Entry->Flink;
+                continue;
+            }
+
+            Penalty = GetFontPenalty(LogFont, pRequestedNameW, &ActualNameW,
+                                     &FullFaceNameW, RequestedCharSet,
+                                     FontGDI, Otm, TM, Face->style_name);
+            if (*MatchPenalty == 0xFFFFFFFF || Penalty < *MatchPenalty)
+            {
+                DPRINT("%ls Penalty: %lu\n", FullFaceNameW.Buffer, Penalty);
+                RtlFreeUnicodeString(pActualNameW);
+                RtlCreateUnicodeString(pActualNameW, ActualNameW.Buffer);
+
+                *FontObj = GDIToObj(FontGDI, FONT);
+                *MatchPenalty = Penalty;
+            }
+
+            RtlFreeUnicodeString(&FullFaceNameW);
+        }
+
+        /* free strings */
+        RtlFreeUnicodeString(&ActualNameW);
+
+        /* next entry */
         Entry = Entry->Flink;
     }
-}
 
-static __inline BOOLEAN
-SubstituteFontFamilyKey(PUNICODE_STRING FaceName,
-                        LPCWSTR Key)
-{
-    RTL_QUERY_REGISTRY_TABLE QueryTable[2] = {{0}};
-    NTSTATUS Status;
-    UNICODE_STRING Value;
-
-    RtlInitUnicodeString(&Value, NULL);
-
-    QueryTable[0].QueryRoutine = NULL;
-    QueryTable[0].Flags = RTL_QUERY_REGISTRY_DIRECT | RTL_QUERY_REGISTRY_NOEXPAND |
-                          RTL_QUERY_REGISTRY_REQUIRED;
-    QueryTable[0].Name = FaceName->Buffer;
-    QueryTable[0].EntryContext = &Value;
-    QueryTable[0].DefaultType = REG_NONE;
-    QueryTable[0].DefaultData = NULL;
-    QueryTable[0].DefaultLength = 0;
-
-    QueryTable[1].QueryRoutine = NULL;
-    QueryTable[1].Name = NULL;
-
-    Status = RtlQueryRegistryValues(RTL_REGISTRY_WINDOWS_NT,
-                                    Key,
-                                    QueryTable,
-                                    NULL,
-                                    NULL);
-    if (NT_SUCCESS(Status))
-    {
-        RtlFreeUnicodeString(FaceName);
-        *FaceName = Value;
-    }
-
-    return NT_SUCCESS(Status);
-}
-
-static __inline void
-SubstituteFontFamily(PUNICODE_STRING FaceName, UINT Level)
-{
-    if (10 < Level) /* Enough is enough */
-    {
-        return;
-    }
-
-    if (SubstituteFontFamilyKey(FaceName, L"FontSubstitutes"))
-    {
-        SubstituteFontFamily(FaceName, Level + 1);
-    }
+    if (Otm)
+        ExFreePoolWithTag(Otm, GDITAG_TEXT);
 }
 
 static
@@ -2881,25 +4083,26 @@ IntFontType(PFONTGDI Font)
 {
     PS_FontInfoRec psfInfo;
     FT_ULong tmp_size = 0;
+    FT_Face Face = Font->SharedFace->Face;
 
-    if (FT_HAS_MULTIPLE_MASTERS(Font->face))
+    if (FT_HAS_MULTIPLE_MASTERS(Face))
         Font->FontObj.flFontType |= FO_MULTIPLEMASTER;
-    if (FT_HAS_VERTICAL( Font->face ))
+    if (FT_HAS_VERTICAL(Face))
         Font->FontObj.flFontType |= FO_VERT_FACE;
-    if (FT_IS_SCALABLE( Font->face ))
+    if (!FT_IS_SCALABLE(Face))
         Font->FontObj.flFontType |= FO_TYPE_RASTER;
-    if (FT_IS_SFNT(Font->face))
+    if (FT_IS_SFNT(Face))
     {
         Font->FontObj.flFontType |= FO_TYPE_TRUETYPE;
-        if (FT_Get_Sfnt_Table(Font->face, ft_sfnt_post))
+        if (FT_Get_Sfnt_Table(Face, ft_sfnt_post))
             Font->FontObj.flFontType |= FO_POSTSCRIPT;
     }
-    if (!FT_Get_PS_Font_Info(Font->face, &psfInfo ))
+    if (!FT_Get_PS_Font_Info(Face, &psfInfo ))
     {
         Font->FontObj.flFontType |= FO_POSTSCRIPT;
     }
     /* Check for the presence of the 'CFF ' table to check if the font is Type1 */
-    if (!FT_Load_Sfnt_Table(Font->face, FT_MAKE_TAG('C','F','F',' '), 0, NULL, &tmp_size))
+    if (!FT_Load_Sfnt_Table(Face, TTAG_CFF, 0, NULL, &tmp_size))
     {
         Font->FontObj.flFontType |= (FO_CFF|FO_POSTSCRIPT);
     }
@@ -2911,9 +4114,12 @@ TextIntRealizeFont(HFONT FontHandle, PTEXTOBJ pTextObj)
 {
     NTSTATUS Status = STATUS_SUCCESS;
     PTEXTOBJ TextObj;
-    UNICODE_STRING FaceName;
+    UNICODE_STRING ActualNameW, RequestedNameW;
     PPROCESSINFO Win32Process;
-    UINT MatchScore;
+    ULONG MatchPenalty;
+    LOGFONTW *pLogFont;
+    FT_Face Face;
+    BYTE RequestedCharSet;
 
     if (!pTextObj)
     {
@@ -2930,35 +4136,49 @@ TextIntRealizeFont(HFONT FontHandle, PTEXTOBJ pTextObj)
         }
     }
     else
+    {
         TextObj = pTextObj;
+    }
 
-    if (! RtlCreateUnicodeString(&FaceName, TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfFaceName))
+    RtlInitUnicodeString(&ActualNameW, NULL);
+
+    pLogFont = &TextObj->logfont.elfEnumLogfontEx.elfLogFont;
+    if (!RtlCreateUnicodeString(&RequestedNameW, pLogFont->lfFaceName))
     {
         if (!pTextObj) TEXTOBJ_UnlockText(TextObj);
         return STATUS_NO_MEMORY;
     }
-    SubstituteFontFamily(&FaceName, 0);
-    MatchScore = 0;
+
+    /* substitute */
+    RequestedCharSet = pLogFont->lfCharSet;
+    DPRINT("Font '%ls,%u' is substituted by: ",
+           RequestedNameW.Buffer, RequestedCharSet);
+    SubstituteFontRecurse(&RequestedNameW, &RequestedCharSet);
+    DPRINT("'%ls,%u'.\n", RequestedNameW.Buffer, RequestedCharSet);
+
+    MatchPenalty = 0xFFFFFFFF;
     TextObj->Font = NULL;
 
-    /* First search private fonts */
     Win32Process = PsGetCurrentProcessWin32Process();
+
+    /* Search private fonts */
     IntLockProcessPrivateFonts(Win32Process);
-    FindBestFontFromList(&TextObj->Font, &MatchScore,
-                         &TextObj->logfont.elfEnumLogfontEx.elfLogFont, &FaceName,
+    FindBestFontFromList(&TextObj->Font, &MatchPenalty, pLogFont,
+                         &RequestedNameW, &ActualNameW, RequestedCharSet,
                          &Win32Process->PrivateFontListHead);
     IntUnLockProcessPrivateFonts(Win32Process);
 
     /* Search system fonts */
     IntLockGlobalFonts;
-    FindBestFontFromList(&TextObj->Font, &MatchScore,
-                         &TextObj->logfont.elfEnumLogfontEx.elfLogFont, &FaceName,
+    FindBestFontFromList(&TextObj->Font, &MatchPenalty, pLogFont,
+                         &RequestedNameW, &ActualNameW, RequestedCharSet,
                          &FontListHead);
     IntUnLockGlobalFonts;
+
     if (NULL == TextObj->Font)
     {
-        DPRINT1("Requested font %S not found, no fonts loaded at all\n",
-                TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfFaceName);
+        DPRINT1("Request font %S not found, no fonts loaded at all\n",
+                pLogFont->lfFaceName);
         Status = STATUS_NOT_FOUND;
     }
     else
@@ -2969,13 +4189,31 @@ TextIntRealizeFont(HFONT FontHandle, PTEXTOBJ pTextObj)
         TextObj->Font->iUniq = 1; // Now it can be cached.
         IntFontType(FontGdi);
         FontGdi->flType = TextObj->Font->flFontType;
-        FontGdi->Underline = TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfUnderline ? 0xff : 0;
-        FontGdi->StrikeOut = TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfStrikeOut ? 0xff : 0;
+        FontGdi->RequestUnderline = pLogFont->lfUnderline ? 0xFF : 0;
+        FontGdi->RequestStrikeOut = pLogFont->lfStrikeOut ? 0xFF : 0;
+        FontGdi->RequestItalic = pLogFont->lfItalic ? 0xFF : 0;
+        if (pLogFont->lfWeight != FW_DONTCARE)
+            FontGdi->RequestWeight = pLogFont->lfWeight;
+        else
+            FontGdi->RequestWeight = FW_NORMAL;
+
+        Face = FontGdi->SharedFace->Face;
+
+        //FontGdi->OriginalWeight = WeightFromStyle(Face->style_name);
+
+        if (!FontGdi->OriginalItalic)
+            FontGdi->OriginalItalic = ItalicFromStyle(Face->style_name);
+
         TextObj->fl |= TEXTOBJECT_INIT;
         Status = STATUS_SUCCESS;
+
+        DPRINT("RequestedNameW: %ls (CharSet: %d) -> ActualNameW: %ls (CharSet: %d)\n",
+            RequestedNameW.Buffer, pLogFont->lfCharSet,
+            ActualNameW.Buffer, FontGdi->CharSet);
     }
 
-    RtlFreeUnicodeString(&FaceName);
+    RtlFreeUnicodeString(&RequestedNameW);
+    RtlFreeUnicodeString(&ActualNameW);
     if (!pTextObj) TEXTOBJ_UnlockText(TextObj);
 
     ASSERT((NT_SUCCESS(Status) ^ (NULL == TextObj->Font)) != 0);
@@ -3029,6 +4267,44 @@ IntGetFullFileName(
     return TRUE;
 }
 
+static BOOL
+EqualFamilyInfo(FONTFAMILYINFO *pInfo1, FONTFAMILYINFO *pInfo2)
+{
+    UNICODE_STRING Str1, Str2;
+    ENUMLOGFONTEXW *pLog1 = &pInfo1->EnumLogFontEx;
+    ENUMLOGFONTEXW *pLog2 = &pInfo2->EnumLogFontEx;
+    RtlInitUnicodeString(&Str1, pLog1->elfLogFont.lfFaceName);
+    RtlInitUnicodeString(&Str2, pLog2->elfLogFont.lfFaceName);
+    if (!RtlEqualUnicodeString(&Str1, &Str2, TRUE))
+    {
+        return FALSE;
+    }
+    if ((pLog1->elfStyle != NULL) != (pLog2->elfStyle != NULL))
+        return FALSE;
+    if (pLog1->elfStyle != NULL)
+    {
+        RtlInitUnicodeString(&Str1, pLog1->elfStyle);
+        RtlInitUnicodeString(&Str2, pLog2->elfStyle);
+        if (!RtlEqualUnicodeString(&Str1, &Str2, TRUE))
+        {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static VOID
+IntAddNameFromFamInfo(LPWSTR psz, FONTFAMILYINFO *FamInfo)
+{
+    wcscat(psz, FamInfo->EnumLogFontEx.elfLogFont.lfFaceName);
+    if (FamInfo->EnumLogFontEx.elfStyle[0] &&
+        _wcsicmp(FamInfo->EnumLogFontEx.elfStyle, L"Regular") != 0)
+    {
+        wcscat(psz, L" ");
+        wcscat(psz, FamInfo->EnumLogFontEx.elfStyle);
+    }
+}
+
 BOOL
 FASTCALL
 IntGdiGetFontResourceInfo(
@@ -3041,9 +4317,14 @@ IntGdiGetFontResourceInfo(
     POBJECT_NAME_INFORMATION NameInfo1, NameInfo2;
     PLIST_ENTRY ListEntry;
     PFONT_ENTRY FontEntry;
-    FONTFAMILYINFO Info;
-    ULONG Size;
-    BOOL bFound = FALSE;
+    ULONG Size, i, Count;
+    LPBYTE pbBuffer;
+    BOOL IsEqual;
+    FONTFAMILYINFO *FamInfo;
+    const ULONG MaxFamInfo = 64;
+    BOOL bSuccess;
+
+    DPRINT("IntGdiGetFontResourceInfo: dwType == %lu\n", dwType);
 
     /* Create buffer for full path name */
     Size = sizeof(OBJECT_NAME_INFORMATION) + MAX_PATH * sizeof(WCHAR);
@@ -3070,26 +4351,50 @@ IntGdiGetFontResourceInfo(
         return FALSE;
     }
 
+    FamInfo = ExAllocatePoolWithTag(PagedPool,
+                                    sizeof(FONTFAMILYINFO) * MaxFamInfo,
+                                    TAG_FINF);
+    if (!FamInfo)
+    {
+        ExFreePoolWithTag(NameInfo2, TAG_FINF);
+        ExFreePoolWithTag(NameInfo1, TAG_FINF);
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
     /* Try to find the pathname in the global font list */
+    Count = 0;
     IntLockGlobalFonts;
-    for (ListEntry = FontListHead.Flink;
-            ListEntry != &FontListHead;
-            ListEntry = ListEntry->Flink)
+    for (ListEntry = FontListHead.Flink; ListEntry != &FontListHead;
+         ListEntry = ListEntry->Flink)
     {
         FontEntry = CONTAINING_RECORD(ListEntry, FONT_ENTRY, ListEntry);
-        if (FontEntry->Font->Filename != NULL)
+        if (FontEntry->Font->Filename == NULL)
+            continue;
+
+        RtlInitUnicodeString(&EntryFileName , FontEntry->Font->Filename);
+        if (!IntGetFullFileName(NameInfo2, Size, &EntryFileName))
+            continue;
+
+        if (!RtlEqualUnicodeString(&NameInfo1->Name, &NameInfo2->Name, FALSE))
+            continue;
+
+        IsEqual = FALSE;
+        FontFamilyFillInfo(&FamInfo[Count], FontEntry->FaceName.Buffer,
+                           FontEntry->Font);
+        for (i = 0; i < Count; ++i)
         {
-            RtlInitUnicodeString(&EntryFileName , FontEntry->Font->Filename);
-            if (IntGetFullFileName(NameInfo2, Size, &EntryFileName))
+            if (EqualFamilyInfo(&FamInfo[i], &FamInfo[Count]))
             {
-                if (RtlEqualUnicodeString(&NameInfo1->Name, &NameInfo2->Name, FALSE))
-                {
-                    /* Found */
-                    FontFamilyFillInfo(&Info, FontEntry->FaceName.Buffer, FontEntry->Font);
-                    bFound = TRUE;
-                    break;
-                }
+                IsEqual = TRUE;
+                break;
             }
+        }
+        if (!IsEqual)
+        {
+            /* Found */
+            ++Count;
+            if (Count >= MaxFamInfo)
+                break;
         }
     }
     IntUnLockGlobalFonts;
@@ -3098,49 +4403,179 @@ IntGdiGetFontResourceInfo(
     ExFreePoolWithTag(NameInfo1, TAG_FINF);
     ExFreePool(NameInfo2);
 
-    if (!bFound && dwType != 5)
+    if (Count == 0 && dwType != 5)
     {
         /* Font could not be found in system table
            dwType == 5 will still handle this */
+        ExFreePoolWithTag(FamInfo, TAG_FINF);
         return FALSE;
     }
 
+    bSuccess = FALSE;
     switch (dwType)
     {
     case 0: /* FIXME: Returns 1 or 2, don't know what this is atm */
-        *(DWORD*)pBuffer = 1;
-        *pdwBytes = sizeof(DWORD);
+        Size = sizeof(DWORD);
+        if (*pdwBytes == 0)
+        {
+            *pdwBytes = Size;
+            bSuccess = TRUE;
+        }
+        else if (pBuffer)
+        {
+            if (*pdwBytes >= Size)
+            {
+                *(DWORD*)pBuffer = Count;
+            }
+            *pdwBytes = Size;
+            bSuccess = TRUE;
+        }
         break;
 
-    case 1: /* Copy the full font name */
-        Size = wcslen(Info.EnumLogFontEx.elfFullName) + 1;
-        Size = min(Size , LF_FULLFACESIZE) * sizeof(WCHAR);
-        RtlCopyMemory(pBuffer, Info.EnumLogFontEx.elfFullName, Size);
-        // FIXME: Do we have to zeroterminate?
-        *pdwBytes = Size;
+    case 1: /* copy the font title */
+        /* calculate the required size */
+        Size = 0;
+        Size += wcslen(FamInfo[0].EnumLogFontEx.elfLogFont.lfFaceName);
+        if (FamInfo[0].EnumLogFontEx.elfStyle[0] &&
+            _wcsicmp(FamInfo[0].EnumLogFontEx.elfStyle, L"Regular") != 0)
+        {
+            Size += 1 + wcslen(FamInfo[0].EnumLogFontEx.elfStyle);
+        }
+        for (i = 1; i < Count; ++i)
+        {
+            Size += 3;  /* " & " */
+            Size += wcslen(FamInfo[i].EnumLogFontEx.elfLogFont.lfFaceName);
+            if (FamInfo[i].EnumLogFontEx.elfStyle[0] &&
+                _wcsicmp(FamInfo[i].EnumLogFontEx.elfStyle, L"Regular") != 0)
+            {
+                Size += 1 + wcslen(FamInfo[i].EnumLogFontEx.elfStyle);
+            }
+        }
+        Size += 2;  /* "\0\0" */
+        Size *= sizeof(WCHAR);
+
+        if (*pdwBytes == 0)
+        {
+            *pdwBytes = Size;
+            bSuccess = TRUE;
+        }
+        else if (pBuffer)
+        {
+            if (*pdwBytes >= Size)
+            {
+                /* store font title to buffer */
+                WCHAR *psz = pBuffer;
+                *psz = 0;
+                IntAddNameFromFamInfo(psz, &FamInfo[0]);
+                for (i = 1; i < Count; ++i)
+                {
+                    wcscat(psz, L" & ");
+                    IntAddNameFromFamInfo(psz, &FamInfo[i]);
+                }
+                psz[wcslen(psz) + 1] = UNICODE_NULL;
+                *pdwBytes = Size;
+                bSuccess = TRUE;
+            }
+            else
+            {
+                *pdwBytes = 1024;       /* this is confirmed value */
+            }
+        }
         break;
 
-    case 2: /* Copy a LOGFONTW structure */
-        Info.EnumLogFontEx.elfLogFont.lfWidth = 0;
-        RtlCopyMemory(pBuffer, &Info.EnumLogFontEx.elfLogFont, sizeof(LOGFONTW));
-        *pdwBytes = sizeof(LOGFONTW);
+    case 2: /* Copy an array of LOGFONTW */
+        Size = Count * sizeof(LOGFONTW);
+        if (*pdwBytes == 0)
+        {
+            *pdwBytes = Size;
+            bSuccess = TRUE;
+        }
+        else if (pBuffer)
+        {
+            if (*pdwBytes >= Size)
+            {
+                pbBuffer = (LPBYTE)pBuffer;
+                for (i = 0; i < Count; ++i)
+                {
+                    FamInfo[i].EnumLogFontEx.elfLogFont.lfWidth = 0;
+                    RtlCopyMemory(pbBuffer, &FamInfo[i].EnumLogFontEx.elfLogFont, sizeof(LOGFONTW));
+                    pbBuffer += sizeof(LOGFONTW);
+                }
+            }
+            *pdwBytes = Size;
+            bSuccess = TRUE;
+        }
+        else
+        {
+            *pdwBytes = 1024;       /* this is confirmed value */
+        }
         break;
 
-    case 3: /* FIXME: What exactly is copied here? */
-        *(DWORD*)pBuffer = 1;
-        *pdwBytes = sizeof(DWORD*);
+    case 3:
+        Size = sizeof(DWORD);
+        if (*pdwBytes == 0)
+        {
+            *pdwBytes = Size;
+            bSuccess = TRUE;
+        }
+        else if (pBuffer)
+        {
+            if (*pdwBytes >= Size)
+            {
+                /* FIXME: What exactly is copied here? */
+                *(DWORD*)pBuffer = 1;
+            }
+            *pdwBytes = Size;
+            bSuccess = TRUE;
+        }
+        break;
+
+    case 4:     /* full file path */
+        if (FileName->Length >= 4 * sizeof(WCHAR))
+        {
+            /* The beginning of FileName is \??\ */
+            LPWSTR pch = FileName->Buffer + 4;
+            DWORD Length = FileName->Length - 4 * sizeof(WCHAR);
+
+            Size = Length + sizeof(WCHAR);
+            if (*pdwBytes == 0)
+            {
+                *pdwBytes = Size;
+                bSuccess = TRUE;
+            }
+            else if (pBuffer)
+            {
+                if (*pdwBytes >= Size)
+                {
+                    RtlCopyMemory(pBuffer, pch, Size);
+                }
+                *pdwBytes = Size;
+                bSuccess = TRUE;
+            }
+        }
         break;
 
     case 5: /* Looks like a BOOL that is copied, TRUE, if the font was not found */
-        *(BOOL*)pBuffer = !bFound;
-        *pdwBytes = sizeof(BOOL);
+        Size = sizeof(BOOL);
+        if (*pdwBytes == 0)
+        {
+            *pdwBytes = Size;
+            bSuccess = TRUE;
+        }
+        else if (pBuffer)
+        {
+            if (*pdwBytes >= Size)
+            {
+                *(BOOL*)pBuffer = Count == 0;
+            }
+            *pdwBytes = Size;
+            bSuccess = TRUE;
+        }
         break;
-
-    default:
-        return FALSE;
     }
+    ExFreePoolWithTag(FamInfo, TAG_FINF);
 
-    return TRUE;
+    return bSuccess;
 }
 
 
@@ -3148,11 +4583,11 @@ BOOL
 FASTCALL
 ftGdiRealizationInfo(PFONTGDI Font, PREALIZATION_INFO Info)
 {
-    if (FT_HAS_FIXED_SIZES(Font->face))
+    if (FT_HAS_FIXED_SIZES(Font->SharedFace->Face))
         Info->iTechnology = RI_TECH_BITMAP;
     else
     {
-        if (FT_IS_SCALABLE(Font->face))
+        if (FT_IS_SCALABLE(Font->SharedFace->Face))
             Info->iTechnology = RI_TECH_SCALABLE;
         else
             Info->iTechnology = RI_TECH_FIXED;
@@ -3171,7 +4606,7 @@ ftGdiGetKerningPairs( PFONTGDI Font,
 {
     DWORD Count = 0;
     INT i = 0;
-    FT_Face face = Font->face;
+    FT_Face face = Font->SharedFace->Face;
 
     if (FT_HAS_KERNING(face) && face->charmap->encoding == FT_ENCODING_UNICODE)
     {
@@ -3331,7 +4766,7 @@ GreExtTextOutW(
     PDC_ATTR pdcattr;
     SURFOBJ *SurfObj;
     SURFACE *psurf = NULL;
-    int error, glyph_index, n, i;
+    int error, glyph_index, i;
     FT_Face face;
     FT_GlyphSlot glyph;
     FT_BitmapGlyph realglyph;
@@ -3343,7 +4778,6 @@ GreExtTextOutW(
     HBITMAP HSourceGlyph;
     SURFOBJ *SourceGlyphSurf;
     SIZEL bitSize;
-    FT_CharMap found = 0, charmap;
     INT yoff;
     FONTOBJ *FontObj;
     PFONTGDI FontGDI;
@@ -3357,6 +4791,9 @@ GreExtTextOutW(
     PMATRIX pmxWorldToDevice;
     LONG fixAscender, fixDescender;
     FLOATOBJ Scale;
+    LOGFONTW *plf;
+    BOOL EmuBold, EmuItalic;
+    int thickness;
 
     // TODO: Write test-cases to exactly match real Windows in different
     // bad parameters (e.g. does Windows check the DC or the RECT first?).
@@ -3408,16 +4845,16 @@ GreExtTextOutW(
         IntLPtoDP(dc, (POINT *)lprc, 2);
     }
 
-    if(pdcattr->lTextAlign & TA_UPDATECP)
+    if (pdcattr->lTextAlign & TA_UPDATECP)
     {
         Start.x = pdcattr->ptlCurrent.x;
         Start.y = pdcattr->ptlCurrent.y;
     } else {
         Start.x = XStart;
         Start.y = YStart;
-        IntLPtoDP(dc, &Start, 1);
     }
 
+    IntLPtoDP(dc, &Start, 1);
     RealXStart = ((LONGLONG)Start.x + dc->ptlDCOrig.x) << 6;
     YStart = Start.y + dc->ptlDCOrig.y;
 
@@ -3444,6 +4881,11 @@ GreExtTextOutW(
         DestRect.top    += dc->ptlDCOrig.y;
         DestRect.right  += dc->ptlDCOrig.x;
         DestRect.bottom += dc->ptlDCOrig.y;
+
+        if (dc->fs & (DC_ACCUM_APP|DC_ACCUM_WMGR))
+        {
+           IntUpdateBoundsRect(dc, &DestRect);
+        }
 
         DC_vPrepareDCsForBlit(dc, &DestRect, NULL, NULL);
 
@@ -3486,48 +4928,20 @@ GreExtTextOutW(
     ASSERT(FontGDI);
 
     IntLockFreeType;
-    face = FontGDI->face;
-    if (face->charmap == NULL)
-    {
-        DPRINT("WARNING: No charmap selected!\n");
-        DPRINT("This font face has %d charmaps\n", face->num_charmaps);
+    face = FontGDI->SharedFace->Face;
 
-        for (n = 0; n < face->num_charmaps; n++)
-        {
-            charmap = face->charmaps[n];
-            DPRINT("Found charmap encoding: %i\n", charmap->encoding);
-            if (charmap->encoding != 0)
-            {
-                found = charmap;
-                break;
-            }
-        }
-        if (!found)
-        {
-            DPRINT1("WARNING: Could not find desired charmap!\n");
-        }
-        error = FT_Set_Charmap(face, found);
-        if (error)
-        {
-            DPRINT1("WARNING: Could not set the charmap!\n");
-        }
-    }
+    plf = &TextObj->logfont.elfEnumLogfontEx.elfLogFont;
+    EmuBold = (plf->lfWeight >= FW_BOLD && FontGDI->OriginalWeight <= FW_NORMAL);
+    EmuItalic = (plf->lfItalic && !FontGDI->OriginalItalic);
 
     Render = IntIsFontRenderingEnabled();
     if (Render)
-        RenderMode = IntGetFontRenderMode(&TextObj->logfont.elfEnumLogfontEx.elfLogFont);
+        RenderMode = IntGetFontRenderMode(plf);
     else
         RenderMode = FT_RENDER_MODE_MONO;
 
-    error = FT_Set_Pixel_Sizes(
-                face,
-                TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfWidth,
-                /* FIXME: Should set character height if neg */
-                (TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight == 0 ?
-                dc->ppdev->devinfo.lfDefaultFont.lfHeight : abs(TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight)));
-    if (error)
+    if (!TextIntUpdateSize(dc, TextObj, FontGDI, FALSE))
     {
-        DPRINT1("Error in setting pixel sizes: %d\n", error);
         IntUnLockFreeType;
         goto fail;
     }
@@ -3595,9 +5009,12 @@ GreExtTextOutW(
             else
                 glyph_index = FT_Get_Char_Index(face, *TempText);
 
-            if (!(realglyph = ftGdiGlyphCacheGet(face, glyph_index,
-                                                 TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight,
-                                                 pmxWorldToDevice)))
+            if (EmuBold || EmuItalic)
+                realglyph = NULL;
+            else
+                realglyph = ftGdiGlyphCacheGet(face, glyph_index,
+                                               plf->lfHeight, pmxWorldToDevice);
+            if (!realglyph)
             {
                 error = FT_Load_Glyph(face, glyph_index, FT_LOAD_DEFAULT);
                 if (error)
@@ -3606,12 +5023,23 @@ GreExtTextOutW(
                 }
 
                 glyph = face->glyph;
-                realglyph = ftGdiGlyphCacheSet(face,
-                                               glyph_index,
-                                               TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight,
-                                               pmxWorldToDevice,
-                                               glyph,
-                                               RenderMode);
+                if (EmuBold || EmuItalic)
+                {
+                    if (EmuBold)
+                        FT_GlyphSlot_Embolden(glyph);
+                    if (EmuItalic)
+                        FT_GlyphSlot_Oblique(glyph);
+                    realglyph = ftGdiGlyphSet(face, glyph, RenderMode);
+                }
+                else
+                {
+                    realglyph = ftGdiGlyphCacheSet(face,
+                                                   glyph_index,
+                                                   plf->lfHeight,
+                                                   pmxWorldToDevice,
+                                                   glyph,
+                                                   RenderMode);
+                }
                 if (!realglyph)
                 {
                     DPRINT1("Failed to render glyph! [index: %d]\n", glyph_index);
@@ -3630,6 +5058,12 @@ GreExtTextOutW(
 
             TextWidth += realglyph->root.advance.x >> 10;
 
+            if (EmuBold || EmuItalic)
+            {
+                FT_Done_Glyph((FT_Glyph)realglyph);
+                realglyph = NULL;
+            }
+
             previous = glyph_index;
             TempText++;
         }
@@ -3646,10 +5080,6 @@ GreExtTextOutW(
         }
     }
 
-    TextLeft = RealXStart;
-    TextTop = YStart;
-    BackgroundLeft = (RealXStart + 32) >> 6;
-
     /* Lock blit with a dummy rect */
     DC_vPrepareDCsForBlit(dc, NULL, NULL, NULL);
 
@@ -3665,19 +5095,151 @@ GreExtTextOutW(
     if(dc->pdcattr->ulDirty_ & DIRTY_TEXT)
         DC_vUpdateTextBrush(dc) ;
 
+    if (!face->units_per_EM)
+    {
+        thickness = 1;
+    }
+    else
+    {
+        thickness = face->underline_thickness *
+            face->size->metrics.y_ppem / face->units_per_EM;
+        if (thickness <= 0)
+            thickness = 1;
+    }
+
+    if ((fuOptions & ETO_OPAQUE) && plf->lfItalic)
+    {
+        /* Draw background */
+        TextLeft = RealXStart;
+        TextTop = YStart;
+        BackgroundLeft = (RealXStart + 32) >> 6;
+        for (i = 0; i < Count; ++i)
+        {
+            if (fuOptions & ETO_GLYPH_INDEX)
+                glyph_index = String[i];
+            else
+                glyph_index = FT_Get_Char_Index(face, String[i]);
+
+            error = FT_Load_Glyph(face, glyph_index, FT_LOAD_DEFAULT);
+            if (error)
+            {
+                DPRINT1("Failed to load and render glyph! [index: %d]\n", glyph_index);
+                IntUnLockFreeType;
+                DC_vFinishBlit(dc, NULL);
+                goto fail2;
+            }
+
+            glyph = face->glyph;
+            if (EmuBold)
+                FT_GlyphSlot_Embolden(glyph);
+            if (EmuItalic)
+                FT_GlyphSlot_Oblique(glyph);
+            realglyph = ftGdiGlyphSet(face, glyph, RenderMode);
+            if (!realglyph)
+            {
+                DPRINT1("Failed to render glyph! [index: %d]\n", glyph_index);
+                IntUnLockFreeType;
+                DC_vFinishBlit(dc, NULL);
+                goto fail2;
+            }
+
+            /* retrieve kerning distance and move pen position */
+            if (use_kerning && previous && glyph_index && NULL == Dx)
+            {
+                FT_Vector delta;
+                FT_Get_Kerning(face, previous, glyph_index, 0, &delta);
+                TextLeft += delta.x;
+            }
+            DPRINT("TextLeft: %I64d\n", TextLeft);
+            DPRINT("TextTop: %lu\n", TextTop);
+            DPRINT("Advance: %d\n", realglyph->root.advance.x);
+
+            DestRect.left = BackgroundLeft;
+            DestRect.right = (TextLeft + (realglyph->root.advance.x >> 10) + 32) >> 6;
+            DestRect.top = TextTop + yoff - ((fixAscender + 32) >> 6);
+            DestRect.bottom = TextTop + yoff + ((32 - fixDescender) >> 6);
+            MouseSafetyOnDrawStart(dc->ppdev, DestRect.left, DestRect.top, DestRect.right, DestRect.bottom);
+            if (dc->fs & (DC_ACCUM_APP|DC_ACCUM_WMGR))
+            {
+               IntUpdateBoundsRect(dc, &DestRect);
+            }
+            IntEngBitBlt(
+                &psurf->SurfObj,
+                NULL,
+                NULL,
+                &dc->co.ClipObj,
+                NULL,
+                &DestRect,
+                &SourcePoint,
+                &SourcePoint,
+                &dc->eboBackground.BrushObject,
+                &BrushOrigin,
+                ROP4_FROM_INDEX(R3_OPINDEX_PATCOPY));
+            MouseSafetyOnDrawEnd(dc->ppdev);
+            BackgroundLeft = DestRect.right;
+
+            DestRect.left = ((TextLeft + 32) >> 6) + realglyph->left;
+            DestRect.right = DestRect.left + realglyph->bitmap.width;
+            DestRect.top = TextTop + yoff - realglyph->top;
+            DestRect.bottom = DestRect.top + realglyph->bitmap.rows;
+
+            bitSize.cx = realglyph->bitmap.width;
+            bitSize.cy = realglyph->bitmap.rows;
+            MaskRect.right = realglyph->bitmap.width;
+            MaskRect.bottom = realglyph->bitmap.rows;
+
+            if (NULL == Dx)
+            {
+                TextLeft += realglyph->root.advance.x >> 10;
+                DPRINT("New TextLeft: %I64d\n", TextLeft);
+            }
+            else
+            {
+                // FIXME this should probably be a matrix transform with TextTop as well.
+                Scale = pdcattr->mxWorldToDevice.efM11;
+                if (FLOATOBJ_Equal0(&Scale))
+                    FLOATOBJ_Set1(&Scale);
+
+                /* do the shift before multiplying to preserve precision */
+                FLOATOBJ_MulLong(&Scale, Dx[i<<DxShift] << 6); 
+                TextLeft += FLOATOBJ_GetLong(&Scale);
+                DPRINT("New TextLeft2: %I64d\n", TextLeft);
+            }
+
+            if (DxShift)
+            {
+                TextTop -= Dx[2 * i + 1] << 6;
+            }
+
+            previous = glyph_index;
+
+            if (EmuBold || EmuItalic)
+            {
+                FT_Done_Glyph((FT_Glyph)realglyph);
+                realglyph = NULL;
+            }
+        }
+    }
+
     /*
      * The main rendering loop.
      */
-    for (i = 0; i < Count; i++)
+    TextLeft = RealXStart;
+    TextTop = YStart;
+    BackgroundLeft = (RealXStart + 32) >> 6;
+    for (i = 0; i < Count; ++i)
     {
         if (fuOptions & ETO_GLYPH_INDEX)
-            glyph_index = *String;
+            glyph_index = String[i];
         else
-            glyph_index = FT_Get_Char_Index(face, *String);
+            glyph_index = FT_Get_Char_Index(face, String[i]);
 
-        if (!(realglyph = ftGdiGlyphCacheGet(face, glyph_index,
-                                             TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight,
-                                             pmxWorldToDevice)))
+        if (EmuBold || EmuItalic)
+            realglyph = NULL;
+        else
+            realglyph = ftGdiGlyphCacheGet(face, glyph_index,
+                                           plf->lfHeight, pmxWorldToDevice);
+        if (!realglyph)
         {
             error = FT_Load_Glyph(face, glyph_index, FT_LOAD_DEFAULT);
             if (error)
@@ -3687,13 +5249,25 @@ GreExtTextOutW(
                 DC_vFinishBlit(dc, NULL);
                 goto fail2;
             }
+
             glyph = face->glyph;
-            realglyph = ftGdiGlyphCacheSet(face,
-                                           glyph_index,
-                                           TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight,
-                                           pmxWorldToDevice,
-                                           glyph,
-                                           RenderMode);
+            if (EmuBold || EmuItalic)
+            {
+                if (EmuBold)
+                    FT_GlyphSlot_Embolden(glyph);
+                if (EmuItalic)
+                    FT_GlyphSlot_Oblique(glyph);
+                realglyph = ftGdiGlyphSet(face, glyph, RenderMode);
+            }
+            else
+            {
+                realglyph = ftGdiGlyphCacheSet(face,
+                                               glyph_index,
+                                               plf->lfHeight,
+                                               pmxWorldToDevice,
+                                               glyph,
+                                               RenderMode);
+            }
             if (!realglyph)
             {
                 DPRINT1("Failed to render glyph! [index: %d]\n", glyph_index);
@@ -3714,13 +5288,17 @@ GreExtTextOutW(
         DPRINT("TextTop: %lu\n", TextTop);
         DPRINT("Advance: %d\n", realglyph->root.advance.x);
 
-        if (fuOptions & ETO_OPAQUE)
+        if ((fuOptions & ETO_OPAQUE) && !plf->lfItalic)
         {
             DestRect.left = BackgroundLeft;
             DestRect.right = (TextLeft + (realglyph->root.advance.x >> 10) + 32) >> 6;
             DestRect.top = TextTop + yoff - ((fixAscender + 32) >> 6);
             DestRect.bottom = TextTop + yoff + ((32 - fixDescender) >> 6);
             MouseSafetyOnDrawStart(dc->ppdev, DestRect.left, DestRect.top, DestRect.right, DestRect.bottom);
+            if (dc->fs & (DC_ACCUM_APP|DC_ACCUM_WMGR))
+            {
+               IntUpdateBoundsRect(dc, &DestRect);
+            }
             IntEngBitBlt(
                 &psurf->SurfObj,
                 NULL,
@@ -3755,7 +5333,6 @@ GreExtTextOutW(
              * glyph size. Then use memset with 0 to clear it and sourcerect to
              * limit the work of the transbitblt.
              */
-
             HSourceGlyph = EngCreateBitmap(bitSize, realglyph->bitmap.pitch,
                                            BMF_8BPP, BMF_TOPDOWN,
                                            realglyph->bitmap.buffer);
@@ -3781,7 +5358,6 @@ GreExtTextOutW(
              * Use the font data as a mask to paint onto the DCs surface using a
              * brush.
              */
-
             if (lprc && (fuOptions & ETO_CLIPPED) &&
                     DestRect.right >= lprc->right + dc->ptlDCOrig.x)
             {
@@ -3822,10 +5398,52 @@ GreExtTextOutW(
             break;
         }
 
+        if (plf->lfUnderline)
+        {
+            int i, position;
+            if (!face->units_per_EM)
+            {
+                position = 0;
+            }
+            else
+            {
+                position = face->underline_position *
+                    face->size->metrics.y_ppem / face->units_per_EM;
+            }
+            for (i = -thickness / 2; i < -thickness / 2 + thickness; ++i)
+            {
+                EngLineTo(SurfObj,
+                          &dc->co.ClipObj,
+                          &dc->eboText.BrushObject,
+                          (TextLeft >> 6),
+                          TextTop + yoff - position + i,
+                          ((TextLeft + (realglyph->root.advance.x >> 10)) >> 6),
+                          TextTop + yoff - position + i,
+                          NULL,
+                          ROP2_TO_MIX(R2_COPYPEN));
+            }
+        }
+        if (plf->lfStrikeOut)
+        {
+            int i;
+            for (i = -thickness / 2; i < -thickness / 2 + thickness; ++i)
+            {
+                EngLineTo(SurfObj,
+                          &dc->co.ClipObj,
+                          &dc->eboText.BrushObject,
+                          (TextLeft >> 6),
+                          TextTop + yoff - (fixAscender >> 6) / 3 + i,
+                          ((TextLeft + (realglyph->root.advance.x >> 10)) >> 6),
+                          TextTop + yoff - (fixAscender >> 6) / 3 + i,
+                          NULL,
+                          ROP2_TO_MIX(R2_COPYPEN));
+            }
+        }
+
         if (NULL == Dx)
         {
             TextLeft += realglyph->root.advance.x >> 10;
-             DPRINT("New TextLeft: %I64d\n", TextLeft);
+            DPRINT("New TextLeft: %I64d\n", TextLeft);
         }
         else
         {
@@ -3834,7 +5452,8 @@ GreExtTextOutW(
             if (FLOATOBJ_Equal0(&Scale))
                 FLOATOBJ_Set1(&Scale);
 
-            FLOATOBJ_MulLong(&Scale, Dx[i<<DxShift] << 6); // do the shift before multiplying to preserve precision
+            /* do the shift before multiplying to preserve precision */
+            FLOATOBJ_MulLong(&Scale, Dx[i<<DxShift] << 6); 
             TextLeft += FLOATOBJ_GetLong(&Scale);
             DPRINT("New TextLeft2: %I64d\n", TextLeft);
         }
@@ -3846,7 +5465,11 @@ GreExtTextOutW(
 
         previous = glyph_index;
 
-        String++;
+        if (EmuBold || EmuItalic)
+        {
+            FT_Done_Glyph((FT_Glyph)realglyph);
+            realglyph = NULL;
+        }
     }
 
     if (pdcattr->lTextAlign & TA_UPDATECP) {
@@ -3856,6 +5479,7 @@ GreExtTextOutW(
     IntUnLockFreeType;
 
     DC_vFinishBlit(dc, NULL) ;
+
     EXLATEOBJ_vCleanup(&exloRGB2Dst);
     EXLATEOBJ_vCleanup(&exloDst2RGB);
     if (TextObj != NULL)
@@ -4026,6 +5650,7 @@ NtGdiGetCharABCWidthsW(
     NTSTATUS Status = STATUS_SUCCESS;
     PMATRIX pmxWorldToDevice;
     PWCHAR Safepwch = NULL;
+    LOGFONTW *plf;
 
     if (!Buffer)
     {
@@ -4110,7 +5735,7 @@ NtGdiGetCharABCWidthsW(
 
     FontGDI = ObjToGDI(TextObj->Font, FONT);
 
-    face = FontGDI->face;
+    face = FontGDI->SharedFace->Face;
     if (face->charmap == NULL)
     {
         for (i = 0; i < (UINT)face->num_charmaps; i++)
@@ -4140,12 +5765,9 @@ NtGdiGetCharABCWidthsW(
         IntUnLockFreeType;
     }
 
+    plf = &TextObj->logfont.elfEnumLogfontEx.elfLogFont;
     IntLockFreeType;
-    FT_Set_Pixel_Sizes(face,
-                       TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfWidth,
-                       /* FIXME: Should set character height if neg */
-                       (TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight == 0 ?
-                       dc->ppdev->devinfo.lfDefaultFont.lfHeight : abs(TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight)));
+    IntRequestFontSize(dc, face, plf->lfWidth, plf->lfHeight);
     FtSetCoordinateTransform(face, pmxWorldToDevice);
 
     for (i = FirstChar; i < FirstChar+Count; i++)
@@ -4238,6 +5860,7 @@ NtGdiGetCharWidthW(
     HFONT hFont = 0;
     PMATRIX pmxWorldToDevice;
     PWCHAR Safepwc = NULL;
+    LOGFONTW *plf;
 
     if (UnSafepwc)
     {
@@ -4308,7 +5931,7 @@ NtGdiGetCharWidthW(
 
     FontGDI = ObjToGDI(TextObj->Font, FONT);
 
-    face = FontGDI->face;
+    face = FontGDI->SharedFace->Face;
     if (face->charmap == NULL)
     {
         for (i = 0; i < (UINT)face->num_charmaps; i++)
@@ -4338,12 +5961,9 @@ NtGdiGetCharWidthW(
         IntUnLockFreeType;
     }
 
+    plf = &TextObj->logfont.elfEnumLogfontEx.elfLogFont;
     IntLockFreeType;
-    FT_Set_Pixel_Sizes(face,
-                       TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfWidth,
-                       /* FIXME: Should set character height if neg */
-                       (TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight == 0 ?
-                       dc->ppdev->devinfo.lfDefaultFont.lfHeight : abs(TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight)));
+    IntRequestFontSize(dc, face, plf->lfWidth, plf->lfHeight);
     FtSetCoordinateTransform(face, pmxWorldToDevice);
 
     for (i = FirstChar; i < FirstChar+Count; i++)
@@ -4383,6 +6003,9 @@ NtGdiGetCharWidthW(
 /*
 * @implemented
 */
+// TODO: Move this code into NtGdiGetGlyphIndicesWInternal and wrap
+// NtGdiGetGlyphIndicesW around NtGdiGetGlyphIndicesWInternal instead.
+// NOTE: See also GreGetGlyphIndicesW.
 __kernel_entry
 W32KAPI
 DWORD
@@ -4398,7 +6021,7 @@ NtGdiGetGlyphIndicesW(
     PDC_ATTR pdcattr;
     PTEXTOBJ TextObj;
     PFONTGDI FontGDI;
-    HFONT hFont = 0;
+    HFONT hFont = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
     OUTLINETEXTMETRICW *potm;
     INT i;
@@ -4409,12 +6032,31 @@ NtGdiGetGlyphIndicesW(
     LPCWSTR UnSafepwc = pwc;
     LPWORD UnSafepgi = pgi;
 
-    if ((!UnSafepwc) && (!UnSafepgi)) return cwc;
+    /* Check for integer overflow */
+    if (cwc & 0x80000000) // (INT_MAX + 1) == INT_MIN 
+        return GDI_ERROR;
 
-    if ((UnSafepwc == NULL) || (UnSafepgi == NULL))
+    if (!UnSafepwc && !UnSafepgi)
+        return cwc;
+
+    if (!UnSafepwc || !UnSafepgi)
     {
         DPRINT1("UnSafepwc == %p, UnSafepgi = %p\n", UnSafepwc, UnSafepgi);
-        return -1;
+        return GDI_ERROR;
+    }
+
+    // TODO: Special undocumented case!
+    if (!pwc && !pgi && (cwc == 0))
+    {
+        DPRINT1("ERR: NtGdiGetGlyphIndicesW with (!pwc && !pgi && (cwc == 0)) is UNIMPLEMENTED!\n");
+        return 0;
+    }
+
+    // FIXME: This is a hack!! (triggered by e.g. Word 2010). See CORE-12825
+    if (cwc == 0)
+    {
+        DPRINT1("ERR: NtGdiGetGlyphIndicesW with (cwc == 0) is UNIMPLEMENTED!\n");
+        return GDI_ERROR;
     }
 
     dc = DC_LockDc(hdc);
@@ -4446,10 +6088,11 @@ NtGdiGetGlyphIndicesW(
     }
     else
     {
-        if (FT_IS_SFNT(FontGDI->face))
+        FT_Face Face = FontGDI->SharedFace->Face;
+        if (FT_IS_SFNT(Face))
         {
-            TT_OS2 *pOS2 = FT_Get_Sfnt_Table(FontGDI->face, ft_sfnt_os2);
-            DefChar = (pOS2->usDefaultChar ? FT_Get_Char_Index(FontGDI->face, pOS2->usDefaultChar) : 0);
+            TT_OS2 *pOS2 = FT_Get_Sfnt_Table(Face, ft_sfnt_os2);
+            DefChar = (pOS2->usDefaultChar ? FT_Get_Char_Index(Face, pOS2->usDefaultChar) : 0);
         }
         else
         {
@@ -4492,7 +6135,7 @@ NtGdiGetGlyphIndicesW(
 
     for (i = 0; i < cwc; i++)
     {
-        Buffer[i] = FT_Get_Char_Index(FontGDI->face, Safepwc[i]);
+        Buffer[i] = FT_Get_Char_Index(FontGDI->SharedFace->Face, Safepwc[i]);
         if (Buffer[i] == 0)
         {
             Buffer[i] = DefChar;

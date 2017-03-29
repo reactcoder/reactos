@@ -1035,11 +1035,11 @@ BmFwMemoryInitialize (
     AddressRange.Maximum = 0xFFFFF;
     AddressRange.Minimum = 0;
 
-    /* Allocate one reserved page with the "reserved" attribute */
+    /* Allocate one reserved page with the "below 1MB" attribute */
     Status = MmPapAllocatePhysicalPagesInRange(&PhysicalAddress,
                                                BlApplicationReserved,
                                                1,
-                                               BlMemoryReserved,
+                                               BlMemoryBelow1MB,
                                                0,
                                                &MmMdlUnmappedAllocated,
                                                &AddressRange,
@@ -2276,7 +2276,7 @@ BmpTransferExecution (
                                            BcdLibraryDevice_ApplicationDevice,
                                            &AppDevice,
                                            NULL);
-            if (NT_SUCCESS(Status))
+            if (!NT_SUCCESS(Status))
             {
                 /* Force re-enumeration */
                 Status = BlFwEnumerateDevice(AppDevice);
@@ -2892,6 +2892,65 @@ BmMain (
         {
             /* Signature invalid, fail boot */
             goto Failure;
+        }
+    }
+
+
+    /* TEST MODE */
+    EfiPrintf(L"Performing memory allocator tests...\r\n");
+    {
+        NTSTATUS Status;
+        PHYSICAL_ADDRESS PhysicalAddress, PhysicalAddress2;
+
+        /* Allocate 1 physical page */
+        PhysicalAddress.QuadPart = 0;
+        Status = BlMmAllocatePhysicalPages(&PhysicalAddress, BlLoaderData, 1, 0, 1);
+        if (Status != STATUS_SUCCESS)
+        {
+            EfiPrintf(L"FAIL: Allocation status: %lx at address: %llx\r\n", Status, PhysicalAddress.QuadPart);
+            EfiStall(100000000);
+        }
+
+        /* Write some data */
+        *(PULONG)((ULONG_PTR)PhysicalAddress.QuadPart) = 0x55555151;
+
+        /* Free it */
+        Status = BlMmFreePhysicalPages(PhysicalAddress);
+        if (Status != STATUS_SUCCESS)
+        {
+            EfiPrintf(L"FAIL: Memory free status: %lx\r\n", Status);
+            EfiStall(100000000);
+        }
+
+        /* Allocate a page again */
+        PhysicalAddress2.QuadPart = 0;
+        Status = BlMmAllocatePhysicalPages(&PhysicalAddress2, BlLoaderData, 1, 0, 1);
+        if (Status != STATUS_SUCCESS)
+        {
+            EfiPrintf(L"FAIL: Allocation status: %lx at address: %llx\r\n", Status, PhysicalAddress2.QuadPart);
+            EfiStall(100000000);
+        }
+
+        /* It should've given us the same page, since we freed it */
+        if (PhysicalAddress.QuadPart != PhysicalAddress2.QuadPart)
+        {
+            EfiPrintf(L"FAIL: Non-matching addresses: %llx %llx\r\n", PhysicalAddress.QuadPart, PhysicalAddress2.QuadPart);
+            EfiStall(100000000);
+        }
+
+        /* The data should still be there, since zero-ing is not on for bootmgr */
+        if (*(PULONG)((ULONG_PTR)PhysicalAddress2.QuadPart) != 0x55555151)
+        {
+            EfiPrintf(L"FAIL: Non-matching data: %lx %lx\r\n", 0x55555151, *(PULONG)((ULONG_PTR)PhysicalAddress2.QuadPart));
+            EfiStall(100000000);
+        }
+
+        /* And free the second page again */
+        Status = BlMmFreePhysicalPages(PhysicalAddress);
+        if (Status != STATUS_SUCCESS)
+        {
+            EfiPrintf(L"FAIL: Memory free status: %lx\r\n", Status);
+            EfiStall(100000000);
         }
     }
 

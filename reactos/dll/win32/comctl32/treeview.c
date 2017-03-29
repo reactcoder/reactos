@@ -2531,6 +2531,8 @@ TREEVIEW_DrawItem(const TREEVIEW_INFO *infoPtr, HDC hdc, TREEVIEW_ITEM *item)
     }
 
     hOldFont = SelectObject(hdc, TREEVIEW_FontForItem(infoPtr, item));
+    oldTextColor = SetTextColor(hdc, nmcdhdr.clrText);
+    oldTextBkColor = SetBkColor(hdc, nmcdhdr.clrTextBk);
 
     /* The custom draw handler can query the text rectangle,
      * so get ready. */
@@ -2565,9 +2567,9 @@ TREEVIEW_DrawItem(const TREEVIEW_INFO *infoPtr, HDC hdc, TREEVIEW_ITEM *item)
 
     TREEVIEW_DrawItemLines(infoPtr, hdc, item);
 
-    /* Set colors. Custom draw handler can change these so we do this after it. */
-    oldTextColor = SetTextColor(hdc, nmcdhdr.clrText);
-    oldTextBkColor = SetBkColor(hdc, nmcdhdr.clrTextBk);
+    /* reset colors. Custom draw handler can change them */
+    SetTextColor(hdc, nmcdhdr.clrText);
+    SetBkColor(hdc, nmcdhdr.clrTextBk);
 
     centery = (item->rect.top + item->rect.bottom) / 2;
 
@@ -3686,6 +3688,9 @@ TREEVIEW_HitTest(const TREEVIEW_INFO *infoPtr, LPTVHITTESTINFO lpht)
 	lpht->flags = TVHT_NOWHERE;
         return NULL;
     }
+
+    if (!item->textWidth)
+        TREEVIEW_ComputeTextWidth(infoPtr, item, 0);
 
     if (x >= item->textOffset + item->textWidth)
     {
@@ -5429,8 +5434,10 @@ static BOOL TREEVIEW_NCPaint (const TREEVIEW_INFO *infoPtr, HRGN region, LPARAM 
         CombineRgn (cliprgn, cliprgn, region, RGN_AND);
     OffsetRect(&r, -r.left, -r.top);
 
-    dc = GetDCEx(infoPtr->hwnd, region, DCX_WINDOW|DCX_INTERSECTRGN);
-    OffsetRect(&r, -r.left, -r.top);
+    dc = GetWindowDC(infoPtr->hwnd);
+    /* Exclude client part */
+    ExcludeClipRect(dc, r.left + cxEdge, r.top + cyEdge,
+        r.right - cxEdge, r.bottom -cyEdge);
 
     if (IsThemeBackgroundPartiallyTransparent (theme, 0, 0))
         DrawThemeParentBackground(infoPtr->hwnd, dc, &r);

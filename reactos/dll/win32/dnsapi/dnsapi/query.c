@@ -303,25 +303,25 @@ OpenNetworkDatabase(LPCWSTR Name)
     {
         /* Use defalt path */
         GetSystemDirectoryW(ExpandedPath, MAX_PATH);
-        StringCchLength(ExpandedPath, MAX_PATH, &StringLength);
+        StringCchLengthW(ExpandedPath, MAX_PATH, &StringLength);
         if (ExpandedPath[StringLength - 1] != L'\\')
         {
             /* It isn't, so add it ourselves */
-            StringCchCat(ExpandedPath, MAX_PATH, L"\\");
+            StringCchCatW(ExpandedPath, MAX_PATH, L"\\");
         }
-        StringCchCat(ExpandedPath, MAX_PATH, L"DRIVERS\\ETC\\");
+        StringCchCatW(ExpandedPath, MAX_PATH, L"DRIVERS\\ETC\\");
     }
 
     /* Make sure that the path is backslash-terminated */
-    StringCchLength(ExpandedPath, MAX_PATH, &StringLength);
+    StringCchLengthW(ExpandedPath, MAX_PATH, &StringLength);
     if (ExpandedPath[StringLength - 1] != L'\\')
     {
         /* It isn't, so add it ourselves */
-        StringCchCat(ExpandedPath, MAX_PATH, L"\\");
+        StringCchCatW(ExpandedPath, MAX_PATH, L"\\");
     }
 
     /* Add the database name */
-    StringCchCat(ExpandedPath, MAX_PATH, Name);
+    StringCchCatW(ExpandedPath, MAX_PATH, Name);
 
     /* Return a handle to the file */
     ret = CreateFileW(ExpandedPath,
@@ -346,7 +346,7 @@ CheckForCurrentHostname(CONST CHAR * Name, PFIXED_INFO network_info)
     PIP_ADAPTER_ADDRESSES Addresses = NULL, pip;
     BOOL Found = FALSE;
 
-    if (network_info->DomainName)
+    if (network_info->DomainName[0])
     {
         size_t StringLength;
         size_t TempSize = 2;
@@ -738,7 +738,7 @@ DnsQuery_W(LPCWSTR Name,
             TempLen += StringLength;
             HostWithDomainName = (PCHAR)RtlAllocateHeap(RtlGetProcessHeap(), 0, TempLen);
             StringCchCopyA(HostWithDomainName, TempLen, network_info->HostName);
-            if (network_info->DomainName)
+            if (network_info->DomainName[0])
             {
                 StringCchCatA(HostWithDomainName, TempLen, ".");
                 StringCchCatA(HostWithDomainName, TempLen, network_info->DomainName);
@@ -783,7 +783,7 @@ DnsQuery_W(LPCWSTR Name,
             if ((addr.s_addr != INADDR_ANY) && (addr.s_addr != INADDR_NONE))
                 adns_addserver(astate, addr);
         }
-        if (network_info->DomainName)
+        if (network_info->DomainName[0])
         {
             adns_ccf_search(astate, "LOCALDOMAIN", -1, network_info->DomainName);
         }

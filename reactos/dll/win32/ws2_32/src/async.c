@@ -21,8 +21,8 @@ HANDLE WsAsyncCurrentTaskHandle;
 HANDLE WsAsyncCancelledTaskHandle;
 HINSTANCE WsAsyncDllHandle;
 
-#define WsAsyncLock()   EnterCriticalSection(&WsAsyncCritSect);
-#define WsAsyncUnlock() LeaveCriticalSection(&WsAsyncCritSect);
+#define WsAsyncLock()       EnterCriticalSection(&WsAsyncCritSect)
+#define WsAsyncUnlock()     LeaveCriticalSection(&WsAsyncCritSect)
 
 /* FUNCTIONS *****************************************************************/
 
@@ -700,8 +700,9 @@ WsAsyncGetHost(IN HANDLE TaskHandle,
 
 DWORD
 WINAPI
-WsAsyncThread(IN PWSASYNCCONTEXT Context)
+WsAsyncThread(IN PVOID ThreadContext)
 {
+    PWSASYNCCONTEXT Context = ThreadContext;
     PWSASYNCBLOCK AsyncBlock;
     PLIST_ENTRY Entry;
     HANDLE AsyncEvent = Context->AsyncEvent;
@@ -720,7 +721,7 @@ WsAsyncThread(IN PWSASYNCCONTEXT Context)
         WsAsyncLock();
 
         /* Process the queue */
-        while (ListHead->Flink != ListHead)
+        while (!IsListEmpty(ListHead))
         {
             /* Remove this entry and get the async block */
             Entry = RemoveHeadList(ListHead);
@@ -846,6 +847,8 @@ WsAsyncCheckAndInitThread(VOID)
     {
         /* Initialize Thread Context */
         Context = HeapAlloc(WsSockHeap, 0, sizeof(*Context));
+        if (!Context)
+            goto Exit;
 
         /* Initialize the Queue and event */
         WsAsyncQueue = &Context->AsyncQueue;
@@ -854,24 +857,41 @@ WsAsyncCheckAndInitThread(VOID)
         WsAsyncEvent = Context->AsyncEvent;
 
         /* Prevent us from ever being killed while running */
-        WSAStartup(MAKEWORD(2,2), &WsaData);
+        if (WSAStartup(MAKEWORD(2,2), &WsaData) != ERROR_SUCCESS)
+            goto Fail;
 
         /* Create the thread */
         ThreadHandle = CreateThread(NULL,
                                     0,
-                                    (LPTHREAD_START_ROUTINE)WsAsyncThread,
+                                    WsAsyncThread,
                                     Context,
                                     0,
                                     &Tid);
+        if (ThreadHandle == NULL)
+        {
+            /* Cleanup and fail */
+            WSACleanup();
+            goto Fail;
+        }
 
         /* Close the handle and set init */
         CloseHandle(ThreadHandle);
         WsAsyncThreadInitialized = TRUE;
     }
 
+Exit:
     /* Release the lock */
     WsAsyncUnlock();
     return WsAsyncThreadInitialized;
+
+Fail:
+    /* Close the event, free the Context */
+    if (Context->AsyncEvent)
+        CloseHandle(Context->AsyncEvent);
+    HeapFree(WsSockHeap, 0, Context);
+
+    /* Bail out */
+    goto Exit;
 }
 
 VOID
@@ -953,7 +973,7 @@ WsAsyncCancelRequest(IN HANDLE TaskHandle)
             WsAsyncFreeBlock(AsyncBlock);
             return NO_ERROR;
         }
-        
+
         /* Move to the next entry */
         Entry = Entry->Flink;
     }

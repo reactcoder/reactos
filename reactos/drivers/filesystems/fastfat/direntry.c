@@ -27,7 +27,7 @@ vfatDirEntryGetFirstCluster(
         cluster = pFatDirEntry->Fat.FirstCluster |
                  (pFatDirEntry->Fat.FirstClusterHigh << 16);
     }
-    else if (pDeviceExt->Flags & VCB_IS_FATX)
+    else if (vfatVolumeIsFatX(pDeviceExt))
     {
         cluster = pFatDirEntry->FatX.FirstCluster;
     }
@@ -39,7 +39,6 @@ vfatDirEntryGetFirstCluster(
     return  cluster;
 }
 
-static
 BOOLEAN
 FATIsDirectoryEmpty(
     PVFATFCB Fcb)
@@ -108,7 +107,6 @@ FATIsDirectoryEmpty(
     return TRUE;
 }
 
-static
 BOOLEAN
 FATXIsDirectoryEmpty(
     PVFATFCB Fcb)
@@ -166,16 +164,6 @@ FATXIsDirectoryEmpty(
     }
 
     return TRUE;
-}
-
-BOOLEAN
-VfatIsDirectoryEmpty(
-    PVFATFCB Fcb)
-{
-    if (Fcb->Flags & FCB_IS_FATX_ENTRY)
-        return FATXIsDirectoryEmpty(Fcb);
-    else
-        return FATIsDirectoryEmpty(Fcb);
 }
 
 NTSTATUS

@@ -540,7 +540,7 @@
 539 stdcall RtlDeactivateActivationContext(long long)
 # RtlDebugPrintTimes
 541 stdcall RtlDecodePointer(ptr)
-542 stdcall RtlDecodeSystemPointer(ptr) RtlEncodeSystemPointer
+542 stdcall RtlDecodeSystemPointer(ptr)
 543 stdcall RtlDecompressBuffer(long ptr long ptr long ptr)
 544 stdcall RtlDecompressFragment(long ptr long ptr long long ptr ptr)
 545 stdcall RtlDefaultNpAcl(ptr)
@@ -784,7 +784,7 @@
 779 stdcall RtlNewSecurityObjectEx(ptr ptr ptr ptr long long ptr ptr)
 780 stdcall RtlNewSecurityObjectWithMultipleInheritance(ptr ptr ptr ptr long long long ptr ptr)
 781 stdcall RtlNormalizeProcessParams(ptr)
-782 stdcall RtlNtPathNameToDosPathName(ptr ptr ptr ptr) ; CHECKME
+782 stdcall RtlNtPathNameToDosPathName(long ptr ptr ptr) ; CHECKME (last arg)
 783 stdcall RtlNtStatusToDosError(long)
 784 stdcall RtlNtStatusToDosErrorNoTeb(long)
 785 stdcall RtlNumberGenericTableElements(ptr)
@@ -956,7 +956,7 @@
 948 stdcall RtlZeroMemory(ptr long)
 949 stdcall RtlZombifyActivationContext(ptr)
 950 stdcall RtlpApplyLengthFunction(long long ptr ptr)
-951 stdcall RtlpEnsureBufferSize(ptr ptr ptr) ; CHECKME
+951 stdcall RtlpEnsureBufferSize(long ptr long)
 # stdcall RtlpNotOwnerCriticalSection
 953 stdcall RtlpNtCreateKey(ptr long ptr long ptr ptr)
 954 stdcall RtlpNtEnumerateSubKey(ptr ptr long long)

@@ -214,9 +214,7 @@ BlockIopFreeAlignedBuffer (
 
     if (*BufferSize)
     {
-        EfiPrintf(L"Aligned free not yet implemented\r\n");
-        Status = STATUS_NOT_IMPLEMENTED;
-        //Status = MmPapFreePages(*Buffer, 1);
+        Status = MmPapFreePages(*Buffer, BL_MM_INCLUDE_MAPPED_ALLOCATED);
 
         *Buffer = NULL;
         *BufferSize = 0;
@@ -1012,7 +1010,7 @@ BlockIoEfiGetDeviceInformation (
         {
             /* We only support floppy drives */
             AcpiPath = (ACPI_HID_DEVICE_PATH*)LeafNode;
-            if ((AcpiPath->HID == EISA_PNP_ID(0x604)) &&
+            if ((AcpiPath->HID == EISA_PNP_ID(0x604)) ||
                 (AcpiPath->HID == EISA_PNP_ID(0x700)))
             {
                 /* Set the boot library specific device types */
@@ -1881,8 +1879,7 @@ BlockIopInitialize (
         /* Free the prefetch buffer is one was allocated */
         if (BlockIopPrefetchBuffer)
         {
-            EfiPrintf(L"Failure path not implemented %lx\r\n", Status);
-            //MmPapFreePages(BlockIopPrefetchBuffer, 1);
+            MmPapFreePages(BlockIopPrefetchBuffer, BL_MM_INCLUDE_MAPPED_ALLOCATED);
         }
     }
 

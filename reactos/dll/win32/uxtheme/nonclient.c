@@ -58,6 +58,7 @@ UserHasWindowEdge(DWORD Style, DWORD ExStyle)
         return FALSE;
     if (Style & WS_THICKFRAME)
         return TRUE;
+    Style &= WS_CAPTION;
     if (Style == WS_DLGFRAME || Style == WS_CAPTION)
         return TRUE;
    return FALSE;
@@ -135,7 +136,7 @@ HRESULT WINAPI ThemeDrawCaptionText(HTHEME hTheme, HDC hdc, int iPartId, int iSt
     
     oldTextColor = SetTextColor(hdc, textColor);
     oldBkMode = SetBkMode(hdc, TRANSPARENT);
-    DrawTextW(hdc, pszText, iCharCount, &rt, dwTextFlags);
+    DrawThemeText(hTheme, hdc, iPartId, iStateId, pszText, iCharCount, dwTextFlags, dwTextFlags, pRect);
     SetBkMode(hdc, oldBkMode);
     SetTextColor(hdc, oldTextColor);
 
@@ -215,9 +216,7 @@ ThemeDrawCaptionButton(PDRAW_CONTEXT pcontext,
 {
     RECT rcPart;
     INT ButtonWidth, ButtonHeight, iPartId;
-    
-    ButtonHeight = GetSystemMetrics( pcontext->wi.dwExStyle & WS_EX_TOOLWINDOW ? SM_CYSMSIZE : SM_CYSIZE);
-    ButtonWidth = GetSystemMetrics( pcontext->wi.dwExStyle & WS_EX_TOOLWINDOW ? SM_CXSMSIZE : SM_CXSIZE);
+    SIZE ButtonSize;
 
     switch(buttonId)
     {
@@ -253,6 +252,11 @@ ThemeDrawCaptionButton(PDRAW_CONTEXT pcontext,
         //FIXME: Implement Help Button 
         return;
     }
+
+    GetThemePartSize(pcontext->theme, pcontext->hDC, iPartId, 0, NULL, TS_MIN, &ButtonSize);
+
+    ButtonHeight = GetSystemMetrics( pcontext->wi.dwExStyle & WS_EX_TOOLWINDOW ? SM_CYSMSIZE : SM_CYSIZE);
+    ButtonWidth = MulDiv(ButtonSize.cx, ButtonHeight, ButtonSize.cy);
 
     ButtonHeight -= 4;
     ButtonWidth -= 4;
@@ -442,9 +446,9 @@ DrawClassicFrame(PDRAW_CONTEXT context, RECT* prcCurrent)
                prcCurrent->right - prcCurrent->left, Height, PATCOPY);
         PatBlt(context->hDC, prcCurrent->left, prcCurrent->top, 
                Width, prcCurrent->bottom - prcCurrent->top, PATCOPY);
-        PatBlt(context->hDC, prcCurrent->left, prcCurrent->bottom, 
+        PatBlt(context->hDC, prcCurrent->left, prcCurrent->bottom - 1, 
                prcCurrent->right - prcCurrent->left, -Height, PATCOPY);
-        PatBlt(context->hDC, prcCurrent->right, prcCurrent->top, 
+        PatBlt(context->hDC, prcCurrent->right - 1, prcCurrent->top, 
                -Width, prcCurrent->bottom - prcCurrent->top, PATCOPY);
 
         InflateRect(prcCurrent, -Width, -Height);
@@ -467,9 +471,9 @@ DrawClassicFrame(PDRAW_CONTEXT context, RECT* prcCurrent)
                prcCurrent->right - prcCurrent->left, Height, PATCOPY);
         PatBlt(context->hDC, prcCurrent->left, prcCurrent->top, 
                Width, prcCurrent->bottom - prcCurrent->top, PATCOPY);
-        PatBlt(context->hDC, prcCurrent->left, prcCurrent->bottom, 
+        PatBlt(context->hDC, prcCurrent->left, prcCurrent->bottom - 1, 
                prcCurrent->right - prcCurrent->left, -Height, PATCOPY);
-        PatBlt(context->hDC, prcCurrent->right, prcCurrent->top, 
+        PatBlt(context->hDC, prcCurrent->right - 1, prcCurrent->top, 
               -Width, prcCurrent->bottom - prcCurrent->top, PATCOPY);
 
         InflateRect(prcCurrent, -Width, -Height);
@@ -707,10 +711,6 @@ ThemeHandleNcMouseMove(HWND hWnd, DWORD ht, POINT* pt)
         TrackMouseEvent(&tme);
     }
 
-    /* Dont do any drawing if the hit test wasn't changed */
-    if (ht == pcontext->lastHitTest)
-        return 0;
-
     ThemeInitDrawContext(&context, hWnd, 0);
     if (context.wi.dwStyle & WS_SYSMENU)
     {
@@ -814,6 +814,8 @@ ThemeHandleButton(HWND hWnd, WPARAM wParam)
 
     SetCapture(hWnd);
 
+    ht = wParam;
+
     for (;;)
     {
         if (GetMessageW(&Msg, 0, WM_MOUSEFIRST, WM_MOUSELAST) <= 0)
@@ -854,6 +856,7 @@ DefWndNCHitTest(HWND hWnd, POINT Point)
     POINT ClientPoint;
     WINDOWINFO wi;
 
+    wi.cbSize = sizeof(wi);
     GetWindowInfo(hWnd, &wi);
 
     if (!PtInRect(&wi.rcWindow, Point))
@@ -1089,6 +1092,10 @@ ThemeWndProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, WNDPROC DefWndPr
     //
     case WM_NCUAHDRAWFRAME:
     case WM_NCACTIVATE:
+
+        if ((GetWindowLongW(hWnd, GWL_STYLE) & WS_CAPTION) != WS_CAPTION)
+            return TRUE;
+
         ThemeHandleNCPaint(hWnd, (HRGN)1);
         return TRUE;
     case WM_NCMOUSEMOVE:
@@ -1188,6 +1195,7 @@ HRESULT WINAPI DrawNCPreview(HDC hDC,
     if (!context.theme)
         return E_FAIL;
     context.Active = TRUE;
+    context.wi.cbSize = sizeof(context.wi);
     if (!GetWindowInfo(hwndDummy, &context.wi))
         return E_FAIL;
     context.wi.dwStyle |= WS_VISIBLE;

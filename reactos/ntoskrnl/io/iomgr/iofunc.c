@@ -2115,6 +2115,7 @@ NtQueryInformationFile(IN HANDLE FileHandle,
         }
         _SEH2_END;
     }
+#if DBG
     else
     {
         /* Validate the information class */
@@ -2132,6 +2133,7 @@ NtQueryInformationFile(IN HANDLE FileHandle,
             return STATUS_INFO_LENGTH_MISMATCH;
         }
     }
+#endif
 
     /* Reference the Handle */
     Status = ObReferenceObjectByHandle(FileHandle,
@@ -2238,8 +2240,17 @@ NtQueryInformationFile(IN HANDLE FileHandle,
             }
             _SEH2_END;
 
-            /* Unlock FO */
-            IopUnlockFileObject(FileObject);
+            /* Free the event if we had one */
+            if (LocalEvent)
+            {
+                ExFreePoolWithTag(Event, TAG_IO);
+            }
+
+            /* If FO was locked, unlock it */
+            if (FileObject->Flags & FO_SYNCHRONOUS_IO)
+            {
+                IopUnlockFileObject(FileObject);
+            }
 
             /* We're done with FastIO! */
             ObDereferenceObject(FileObject);

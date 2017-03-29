@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2017, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -109,6 +109,7 @@ typedef enum
     ACPI_DMT_UINT64,
     ACPI_DMT_BUF7,
     ACPI_DMT_BUF10,
+    ACPI_DMT_BUF12,
     ACPI_DMT_BUF16,
     ACPI_DMT_BUF128,
     ACPI_DMT_SIG,
@@ -385,6 +386,8 @@ extern ACPI_DMTABLE_INFO        AcpiDmTableInfoPcct[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoPcctHdr[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoPcct0[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoPcct1[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoPcct2[];
+extern ACPI_DMTABLE_INFO        AcpiDmTableInfoRasf[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoRsdp1[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoRsdp2[];
 extern ACPI_DMTABLE_INFO        AcpiDmTableInfoS3pt[];
@@ -426,7 +429,7 @@ extern ACPI_DMTABLE_INFO        AcpiDmTableInfoGeneric[][2];
  * dmtable and ahtable
  */
 extern const ACPI_DMTABLE_DATA  AcpiDmTableData[];
-extern const AH_TABLE           AcpiSupportedTables[];
+extern const AH_TABLE           Gbl_AcpiSupportedTables[];
 
 UINT8
 AcpiDmGenerateChecksum (
@@ -648,6 +651,10 @@ AcpiDmDisassembleOneOp (
     ACPI_OP_WALK_INFO       *Info,
     ACPI_PARSE_OBJECT       *Op);
 
+BOOLEAN
+AcpiDmIsTempName (
+    ACPI_PARSE_OBJECT       *Op);
+
 UINT32
 AcpiDmListType (
     ACPI_PARSE_OBJECT       *Op);
@@ -794,6 +801,11 @@ AcpiDmClearExternalList (
 void
 AcpiDmEmitExternals (
     void);
+
+void
+AcpiDmEmitExternal (
+    ACPI_PARSE_OBJECT       *NameOp,
+    ACPI_PARSE_OBJECT       *TypeOp);
 
 void
 AcpiDmUnresolvedWarning (
@@ -1089,5 +1101,14 @@ AdDisplayTables (
 ACPI_STATUS
 AdDisplayStatistics (
     void);
+
+
+/*
+ * dmwalk
+ */
+UINT32
+AcpiDmBlockType (
+    ACPI_PARSE_OBJECT       *Op);
+
 
 #endif  /* __ACDISASM_H__ */

@@ -18,7 +18,7 @@ WsThreadDefaultBlockingHook(VOID)
 {
     MSG Message;
     BOOL GotMessage = FALSE;
-    
+
     /* Get the message */
     GotMessage = PeekMessage(&Message, NULL, 0, 0, PM_REMOVE);
 
@@ -46,7 +46,7 @@ WsThreadBlockingCallback(IN DWORD_PTR Context)
     Thread->Cancelled = FALSE;
 
     /* Call the blocking hook */
-    while(Thread->BlockingHook());
+    while (Thread->BlockingHook());
 
     /* We're not blocking anymore */
     Thread->Blocking = FALSE;
@@ -135,12 +135,14 @@ WSAAPI
 WsThreadAllocate(VOID)
 {
     PWSTHREAD Thread;
-    
+
     /* Allocate the object */
     Thread = HeapAlloc(WsSockHeap, HEAP_ZERO_MEMORY, sizeof(*Thread));
-
-    /* Set non-zero data */
-    Thread->BlockingHook = (FARPROC)WsThreadDefaultBlockingHook;
+    if (Thread)
+    {
+        /* Set non-zero data */
+        Thread->BlockingHook = (FARPROC)WsThreadDefaultBlockingHook;
+    }
 
     /* Return it */
     return Thread;
@@ -151,7 +153,7 @@ WSAAPI
 WsThreadStartup(VOID)
 {
     INT ErrorCode = WSASYSCALLFAILURE;
-    
+
     /* Check if we have a valid TLS */
     if (TlsIndex != TLS_OUT_OF_INDEXES)
     {
@@ -175,7 +177,7 @@ WsThreadInitialize(IN PWSTHREAD Thread,
                    IN PWSPROCESS Process)
 {
     INT ErrorCode = WSASYSCALLFAILURE;
-    
+
     /* Set the process */
     Thread->Process = Process;
 
@@ -244,7 +246,7 @@ WsThreadCreate(IN PWSPROCESS Process,
 {
     PWSTHREAD Thread = NULL;
     INT ErrorCode = WSASYSCALLFAILURE;
-    
+
     /* Make sure we have TLS */
     if (TlsIndex != TLS_OUT_OF_INDEXES)
     {

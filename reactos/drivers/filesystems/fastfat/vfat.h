@@ -197,9 +197,9 @@ typedef struct _slot slot;
 
 #define LONGNAME_MAX_LENGTH 	256		// max length for a long filename
 
-#define ENTRY_DELETED(DeviceExt, DirEntry) ((DeviceExt)->Flags & VCB_IS_FATX ? FATX_ENTRY_DELETED(&((DirEntry)->FatX)) : FAT_ENTRY_DELETED(&((DirEntry)->Fat)))
-#define ENTRY_VOLUME(DeviceExt, DirEntry)  ((DeviceExt)->Flags & VCB_IS_FATX ? FATX_ENTRY_VOLUME(&((DirEntry)->FatX)) : FAT_ENTRY_VOLUME(&((DirEntry)->Fat)))
-#define ENTRY_END(DeviceExt, DirEntry)     ((DeviceExt)->Flags & VCB_IS_FATX ? FATX_ENTRY_END(&((DirEntry)->FatX)) : FAT_ENTRY_END(&((DirEntry)->Fat)))
+#define ENTRY_DELETED(IsFatX, DirEntry) (IsFatX ? FATX_ENTRY_DELETED(&((DirEntry)->FatX)) : FAT_ENTRY_DELETED(&((DirEntry)->Fat)))
+#define ENTRY_VOLUME(IsFatX, DirEntry) (IsFatX ? FATX_ENTRY_VOLUME(&((DirEntry)->FatX)) : FAT_ENTRY_VOLUME(&((DirEntry)->Fat)))
+#define ENTRY_END(IsFatX, DirEntry) (IsFatX ? FATX_ENTRY_END(&((DirEntry)->FatX)) : FAT_ENTRY_END(&((DirEntry)->Fat)))
 
 #define FAT_ENTRY_DELETED(DirEntry)  ((DirEntry)->Filename[0] == 0xe5)
 #define FAT_ENTRY_END(DirEntry)      ((DirEntry)->Filename[0] == 0)
@@ -241,6 +241,7 @@ typedef union _DIR_ENTRY DIR_ENTRY, *PDIR_ENTRY;
 typedef struct
 {
     ULONG VolumeID;
+    CHAR VolumeLabel[11];
     ULONG FATStart;
     ULONG FATCount;
     ULONG FATSectors;
@@ -259,6 +260,7 @@ typedef struct
 
 struct _VFATFCB;
 struct _VFAT_DIRENTRY_CONTEXT;
+struct _VFAT_MOVE_CONTEXT;
 
 typedef struct _HASHENTRY
 {
@@ -274,7 +276,18 @@ typedef NTSTATUS (*PGET_NEXT_CLUSTER)(PDEVICE_EXTENSION,ULONG,PULONG);
 typedef NTSTATUS (*PFIND_AND_MARK_AVAILABLE_CLUSTER)(PDEVICE_EXTENSION,PULONG);
 typedef NTSTATUS (*PWRITE_CLUSTER)(PDEVICE_EXTENSION,ULONG,ULONG,PULONG);
 
+typedef BOOLEAN (*PIS_DIRECTORY_EMPTY)(struct _VFATFCB*);
+typedef NTSTATUS (*PADD_ENTRY)(PDEVICE_EXTENSION,PUNICODE_STRING,struct _VFATFCB**,struct _VFATFCB*,ULONG,UCHAR,struct _VFAT_MOVE_CONTEXT*);
+typedef NTSTATUS (*PDEL_ENTRY)(PDEVICE_EXTENSION,struct _VFATFCB*,struct _VFAT_MOVE_CONTEXT*);
 typedef NTSTATUS (*PGET_NEXT_DIR_ENTRY)(PVOID*,PVOID*,struct _VFATFCB*,struct _VFAT_DIRENTRY_CONTEXT*,BOOLEAN);
+
+typedef struct _VFAT_DISPATCH
+{
+    PIS_DIRECTORY_EMPTY IsDirectoryEmpty;
+    PADD_ENTRY AddEntry;
+    PDEL_ENTRY DelEntry;
+    PGET_NEXT_DIR_ENTRY GetNextDirEntry;
+} VFAT_DISPATCH, *PVFAT_DISPATCH;
 
 typedef struct DEVICE_EXTENSION
 {
@@ -302,9 +315,6 @@ typedef struct DEVICE_EXTENSION
     PWRITE_CLUSTER WriteCluster;
     ULONG CleanShutBitMask;
 
-    /* Pointers to functions for manipulating directory entries. */
-    PGET_NEXT_DIR_ENTRY GetNextDirEntry;
-
     ULONG BaseDateYear;
 
     LIST_ENTRY VolumeListEntry;
@@ -319,7 +329,52 @@ typedef struct DEVICE_EXTENSION
     /* VPBs for dismount */
     PVPB IoVPB;
     PVPB SpareVPB;
+
+    /* Pointers to functions for manipulating directory entries. */
+    VFAT_DISPATCH Dispatch;
 } DEVICE_EXTENSION, VCB, *PVCB;
+
+FORCEINLINE
+BOOLEAN
+VfatIsDirectoryEmpty(PDEVICE_EXTENSION DeviceExt,
+                     struct _VFATFCB* Fcb)
+{
+    return DeviceExt->Dispatch.IsDirectoryEmpty(Fcb);
+}
+
+FORCEINLINE
+NTSTATUS
+VfatAddEntry(PDEVICE_EXTENSION DeviceExt,
+             PUNICODE_STRING NameU,
+             struct _VFATFCB** Fcb,
+             struct _VFATFCB* ParentFcb,
+             ULONG RequestedOptions,
+             UCHAR ReqAttr,
+             struct _VFAT_MOVE_CONTEXT* MoveContext)
+{
+    return DeviceExt->Dispatch.AddEntry(DeviceExt, NameU, Fcb, ParentFcb, RequestedOptions, ReqAttr, MoveContext);
+}
+
+FORCEINLINE
+NTSTATUS
+VfatDelEntry(PDEVICE_EXTENSION DeviceExt,
+             struct _VFATFCB* Fcb,
+             struct _VFAT_MOVE_CONTEXT* MoveContext)
+{
+    return DeviceExt->Dispatch.DelEntry(DeviceExt, Fcb, MoveContext);
+}
+
+FORCEINLINE
+NTSTATUS
+VfatGetNextDirEntry(PDEVICE_EXTENSION DeviceExt,
+                    PVOID *pContext,
+                    PVOID *pPage,
+                    struct _VFATFCB* pDirFcb,
+                    struct _VFAT_DIRENTRY_CONTEXT* DirContext,
+                    BOOLEAN First)
+{
+    return DeviceExt->Dispatch.GetNextDirEntry(pContext, pPage, pDirFcb, DirContext, First);
+}
 
 #define VFAT_BREAK_ON_CORRUPTION 1
 
@@ -345,7 +400,6 @@ extern PVFAT_GLOBAL_DATA VfatGlobalData;
 #define FCB_IS_PAGE_FILE        0x0008
 #define FCB_IS_VOLUME           0x0010
 #define FCB_IS_DIRTY            0x0020
-#define FCB_IS_FATX_ENTRY       0x0040
 
 typedef struct _VFATFCB
 {
@@ -515,6 +569,27 @@ VfatMarkIrpContextForQueue(PVFAT_IRP_CONTEXT IrpContext)
     return STATUS_PENDING;
 }
 
+FORCEINLINE
+BOOLEAN
+vfatFCBIsDirectory(PVFATFCB FCB)
+{
+    return BooleanFlagOn(*FCB->Attributes, FILE_ATTRIBUTE_DIRECTORY);
+}
+
+FORCEINLINE
+BOOLEAN
+vfatFCBIsReadOnly(PVFATFCB FCB)
+{
+    return BooleanFlagOn(*FCB->Attributes, FILE_ATTRIBUTE_READONLY);
+}
+
+FORCEINLINE
+BOOLEAN
+vfatVolumeIsFatX(PDEVICE_EXTENSION DeviceExt)
+{
+    return BooleanFlagOn(DeviceExt->Flags, VCB_IS_FATX);
+}
+
 /* blockdev.c */
 
 NTSTATUS
@@ -587,11 +662,6 @@ vfat8Dot3ToString(
     PFAT_DIR_ENTRY pEntry,
     PUNICODE_STRING NameU);
 
-NTSTATUS
-ReadVolumeLabel(
-    PDEVICE_EXTENSION DeviceExt,
-    PVPB Vpb);
-
 /* dir.c */
 
 NTSTATUS
@@ -619,47 +689,12 @@ vfatDirEntryGetFirstCluster(
     PDEVICE_EXTENSION pDeviceExt,
     PDIR_ENTRY pDirEntry);
 
-BOOLEAN
-VfatIsDirectoryEmpty(
-    PVFATFCB Fcb);
-
-NTSTATUS
-FATGetNextDirEntry(
-    PVOID *pContext,
-    PVOID *pPage,
-    IN PVFATFCB pDirFcb,
-    IN PVFAT_DIRENTRY_CONTEXT DirContext,
-    BOOLEAN First);
-
-NTSTATUS
-FATXGetNextDirEntry(
-    PVOID *pContext,
-    PVOID *pPage,
-    IN PVFATFCB pDirFcb,
-    IN PVFAT_DIRENTRY_CONTEXT DirContext,
-    BOOLEAN First);
-
 /* dirwr.c */
 
 NTSTATUS
-VfatAddEntry(
-    PDEVICE_EXTENSION DeviceExt,
-    PUNICODE_STRING PathNameU,
-    PVFATFCB* Fcb,
-    PVFATFCB ParentFcb,
-    ULONG RequestedOptions,
-    UCHAR ReqAttr,
-    PVFAT_MOVE_CONTEXT MoveContext);
-
-NTSTATUS
 VfatUpdateEntry(
-    PVFATFCB pFcb);
-
-NTSTATUS
-VfatDelEntry(
-    PDEVICE_EXTENSION,
-    PVFATFCB,
-    PVFAT_MOVE_CONTEXT);
+    PVFATFCB pFcb,
+    IN BOOLEAN IsFatX);
 
 BOOLEAN
 vfatFindDirSpace(

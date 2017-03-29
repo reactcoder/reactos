@@ -104,17 +104,6 @@ NtUserEvent(
    return 0;
 }
 
-DWORD
-APIENTRY
-NtUserExcludeUpdateRgn(
-  HDC hDC,
-  HWND hWnd)
-{
-   STUB
-
-   return 0;
-}
-
 BOOL
 APIENTRY
 NtUserGetAltTabInfo(
@@ -950,23 +939,6 @@ NtUserCtxDisplayIOCtl(
 {
     STUB;
     return 0;
-}
-
-/*
- * FillWindow: Called from User; Dialog, Edit and ListBox procs during a WM_ERASEBKGND.
- */
-/*
- * @unimplemented
- */
-BOOL APIENTRY
-NtUserFillWindow(HWND hWndPaint,
-                 HWND hWndPaint1,
-                 HDC  hDC,
-                 HBRUSH hBrush)
-{
-   STUB
-
-   return 0;
 }
 
 /*

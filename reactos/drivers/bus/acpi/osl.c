@@ -929,6 +929,16 @@ AcpiOsSignal (
 }
 
 ACPI_STATUS
+AcpiOsEnterSleep(
+    UINT8 SleepState,
+    UINT32 RegaValue,
+    UINT32 RegbValue)
+{
+    DPRINT1("Entering sleep state S%u.\n", SleepState);
+    return AE_OK;
+}
+
+ACPI_STATUS
 AcpiOsGetLine(
     char *Buffer,
     UINT32 BufferLength,

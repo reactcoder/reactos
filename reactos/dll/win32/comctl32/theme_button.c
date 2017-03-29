@@ -34,7 +34,22 @@ typedef enum
 	STATE_DEFAULTED
 } ButtonState;
 
-typedef void (*pfThemedPaint)(HTHEME theme, HWND hwnd, HDC hdc, ButtonState drawState, UINT dtFlags, BOOL focused);
+typedef void (*pfThemedPaint)(HTHEME theme, HWND hwnd, HDC hdc, ButtonState drawState, UINT dtFlags, BOOL focused, LPARAM prfFlag);
+
+static inline LONG get_button_state( HWND hwnd )
+{
+    return _GetButtonData(hwnd)->state;
+}
+
+static inline HFONT get_button_font( HWND hwnd )
+{
+    return (HFONT)_GetButtonData(hwnd)->font;
+}
+
+static inline LONG_PTR get_button_image(HWND hwnd)
+{
+    return _GetButtonData(hwnd)->image;
+}
 
 static UINT get_drawtext_flags(DWORD style, DWORD ex_style)
 {
@@ -87,22 +102,37 @@ static inline WCHAR *get_button_text(HWND hwnd)
     return text;
 }
 
-static void PB_draw(HTHEME theme, HWND hwnd, HDC hDC, ButtonState drawState, UINT dtFlags, BOOL focused)
+static void PB_draw(HTHEME theme, HWND hwnd, HDC hDC, ButtonState drawState, UINT dtFlags, BOOL focused, LPARAM prfFlag)
 {
     static const int states[] = { PBS_NORMAL, PBS_DISABLED, PBS_HOT, PBS_PRESSED, PBS_DEFAULTED };
 
     RECT bgRect, textRect;
-    HFONT font = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
+    HFONT font = get_button_font(hwnd);
     HFONT hPrevFont = font ? SelectObject(hDC, font) : NULL;
     int state = states[ drawState ];
     WCHAR *text = get_button_text(hwnd);
+    PBUTTON_DATA pdata = _GetButtonData(hwnd);
+    SIZE ImageSize;
 
     GetClientRect(hwnd, &bgRect);
     GetThemeBackgroundContentRect(theme, hDC, BP_PUSHBUTTON, state, &bgRect, &textRect);
 
-    if (IsThemeBackgroundPartiallyTransparent(theme, BP_PUSHBUTTON, state))
-        DrawThemeParentBackground(hwnd, hDC, NULL);
+    if (prfFlag == 0)
+    {
+        if (IsThemeBackgroundPartiallyTransparent(theme, BP_PUSHBUTTON, state))
+            DrawThemeParentBackground(hwnd, hDC, NULL);
+    }
+
     DrawThemeBackground(theme, hDC, BP_PUSHBUTTON, state, &bgRect, NULL);
+
+    if (pdata->imlData.himl && ImageList_GetIconSize(pdata->imlData.himl, &ImageSize.cx, &ImageSize.cy))
+    {
+        int left = textRect.left + pdata->imlData.margin.left;
+        int top = textRect.top + (textRect.bottom - textRect.top - ImageSize.cy) / 2;
+        textRect.left += pdata->imlData.margin.left + pdata->imlData.margin.right + ImageSize.cy;
+        ImageList_Draw(pdata->imlData.himl, 0, hDC, left, top, 0);
+    }
+
     if (text)
     {
         DrawThemeText(theme, hDC, BP_PUSHBUTTON, state, text, lstrlenW(text), dtFlags, 0, &textRect);
@@ -127,7 +157,7 @@ static void PB_draw(HTHEME theme, HWND hwnd, HDC hDC, ButtonState drawState, UIN
     if (hPrevFont) SelectObject(hDC, hPrevFont);
 }
 
-static void CB_draw(HTHEME theme, HWND hwnd, HDC hDC, ButtonState drawState, UINT dtFlags, BOOL focused)
+static void CB_draw(HTHEME theme, HWND hwnd, HDC hDC, ButtonState drawState, UINT dtFlags, BOOL focused, LPARAM prfFlag)
 {
     static const int cb_states[3][5] =
     {
@@ -145,7 +175,7 @@ static void CB_draw(HTHEME theme, HWND hwnd, HDC hDC, ButtonState drawState, UIN
     SIZE sz;
     RECT bgRect, textRect;
     HFONT font, hPrevFont = NULL;
-    LRESULT checkState = SendMessageW(hwnd, BM_GETCHECK, 0, 0);
+    LRESULT checkState = get_button_state(hwnd) & 3;
     DWORD dwStyle = GetWindowLongW(hwnd, GWL_STYLE);
     int part = ((dwStyle & BUTTON_TYPE) == BS_RADIOBUTTON) || ((dwStyle & BUTTON_TYPE) == BS_AUTORADIOBUTTON)
              ? BP_RADIOBUTTON
@@ -168,7 +198,7 @@ static void CB_draw(HTHEME theme, HWND hwnd, HDC hDC, ButtonState drawState, UIN
             created_font = TRUE;
         }
     } else {
-        font = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
+        font = get_button_font(hwnd);
         hPrevFont = SelectObject(hDC, font);
     }
 
@@ -186,7 +216,10 @@ static void CB_draw(HTHEME theme, HWND hwnd, HDC hDC, ButtonState drawState, UIN
     bgRect.right = bgRect.left + sz.cx;
     textRect.left = bgRect.right + 6;
 
-    DrawThemeParentBackground(hwnd, hDC, NULL);
+    if (prfFlag == 0)
+    {
+        DrawThemeParentBackground(hwnd, hDC, NULL);
+    }
 
     DrawThemeBackground(theme, hDC, part, state, &bgRect, NULL);
     if (text)
@@ -214,7 +247,7 @@ static void CB_draw(HTHEME theme, HWND hwnd, HDC hDC, ButtonState drawState, UIN
     if (hPrevFont) SelectObject(hDC, hPrevFont);
 }
 
-static void GB_draw(HTHEME theme, HWND hwnd, HDC hDC, ButtonState drawState, UINT dtFlags, BOOL focused)
+static void GB_draw(HTHEME theme, HWND hwnd, HDC hDC, ButtonState drawState, UINT dtFlags, BOOL focused, LPARAM prfFlag)
 {
     static const int states[] = { GBS_NORMAL, GBS_DISABLED, GBS_NORMAL, GBS_NORMAL, GBS_NORMAL };
 
@@ -235,7 +268,7 @@ static void GB_draw(HTHEME theme, HWND hwnd, HDC hDC, ButtonState drawState, UIN
             created_font = TRUE;
         }
     } else {
-        font = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
+        font = get_button_font(hwnd);
         hPrevFont = SelectObject(hDC, font);
     }
 
@@ -257,8 +290,12 @@ static void GB_draw(HTHEME theme, HWND hwnd, HDC hDC, ButtonState drawState, UIN
     GetThemeBackgroundContentRect(theme, hDC, BP_GROUPBOX, state, &bgRect, &contentRect);
     ExcludeClipRect(hDC, contentRect.left, contentRect.top, contentRect.right, contentRect.bottom);
 
-    if (IsThemeBackgroundPartiallyTransparent(theme, BP_GROUPBOX, state))
-        DrawThemeParentBackground(hwnd, hDC, NULL);
+    if (prfFlag == 0)
+    {
+        if (IsThemeBackgroundPartiallyTransparent(theme, BP_GROUPBOX, state))
+            DrawThemeParentBackground(hwnd, hDC, NULL);
+    }
+
     DrawThemeBackground(theme, hDC, BP_GROUPBOX, state, &bgRect, NULL);
 
     SelectClipRgn(hDC, NULL);
@@ -294,16 +331,32 @@ static const pfThemedPaint btnThemedPaintFunc[BUTTON_TYPE + 1] =
     NULL, /* Not defined */
 };
 
-static BOOL BUTTON_Paint(HTHEME theme, HWND hwnd, HDC hParamDC)
+BOOL BUTTON_PaintWithTheme(HTHEME theme, HWND hwnd, HDC hParamDC, LPARAM prfFlag)
 {
-    PAINTSTRUCT ps;
-    HDC hDC;
-    DWORD dwStyle = GetWindowLongW(hwnd, GWL_STYLE);
-    DWORD dwStyleEx = GetWindowLongW(hwnd, GWL_EXSTYLE);
-    UINT dtFlags = get_drawtext_flags(dwStyle, dwStyleEx);
-    int state = (int)SendMessageW(hwnd, BM_GETSTATE, 0, 0);
+    DWORD dwStyle;
+    DWORD dwStyleEx;
+    DWORD type;
+    UINT dtFlags;
+    int state;
     ButtonState drawState;
-    pfThemedPaint paint = btnThemedPaintFunc[ dwStyle & BUTTON_TYPE ];
+    pfThemedPaint paint;
+
+    dwStyle = GetWindowLongW(hwnd, GWL_STYLE);
+    type = dwStyle & BUTTON_TYPE;
+
+    if (type != BS_PUSHBUTTON && type != BS_DEFPUSHBUTTON && (dwStyle & BS_PUSHLIKE))
+        type = BS_PUSHBUTTON;
+
+    paint = btnThemedPaintFunc[type];
+    if (!paint)
+        return FALSE;
+
+    if (get_button_image(hwnd) != 0)
+        return FALSE;
+
+    dwStyleEx = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    dtFlags = get_drawtext_flags(dwStyle, dwStyleEx);
+    state = get_button_state(hwnd);
 
     if(IsWindowEnabled(hwnd))
     {
@@ -314,105 +367,11 @@ static BOOL BUTTON_Paint(HTHEME theme, HWND hwnd, HDC hParamDC)
     }
     else drawState = STATE_DISABLED;
 
-    hDC = hParamDC ? hParamDC : BeginPaint(hwnd, &ps);
-    if (paint) paint(theme, hwnd, hDC, drawState, dtFlags, state & BST_FOCUS);
-    if (!hParamDC) EndPaint(hwnd, &ps);
+    if (drawState == STATE_NORMAL && type == BS_DEFPUSHBUTTON)
+    {
+        drawState = STATE_DEFAULTED;
+    }
+
+    paint(theme, hwnd, hParamDC, drawState, dtFlags, state & BST_FOCUS, prfFlag);
     return TRUE;
-}
-
-/**********************************************************************
- * The button control subclass window proc.
- */
-LRESULT CALLBACK THEMING_ButtonSubclassProc(HWND hwnd, UINT msg,
-                                            WPARAM wParam, LPARAM lParam,
-                                            ULONG_PTR dwRefData)
-{
-    const WCHAR* themeClass = WC_BUTTONW;
-    HTHEME theme;
-    LRESULT result;
-
-    switch (msg)
-    {
-    case WM_CREATE:
-        result = THEMING_CallOriginalClass(hwnd, msg, wParam, lParam);
-        OpenThemeData(hwnd, themeClass);
-        return result;
-
-    case WM_DESTROY:
-        theme = GetWindowTheme(hwnd);
-        CloseThemeData (theme);
-        return THEMING_CallOriginalClass(hwnd, msg, wParam, lParam);
-
-    case WM_THEMECHANGED:
-        theme = GetWindowTheme(hwnd);
-        CloseThemeData (theme);
-        OpenThemeData(hwnd, themeClass);
-        break;
-
-    case WM_SYSCOLORCHANGE:
-        theme = GetWindowTheme(hwnd);
-	if (!theme) return THEMING_CallOriginalClass(hwnd, msg, wParam, lParam);
-        /* Do nothing. When themed, a WM_THEMECHANGED will be received, too,
-	 * which will do the repaint. */
-        break;
-
-    case WM_PAINT:
-        theme = GetWindowTheme(hwnd);
-        if (theme && BUTTON_Paint(theme, hwnd, (HDC)wParam))
-            return 0;
-        else
-            return THEMING_CallOriginalClass(hwnd, msg, wParam, lParam);
-
-    case WM_ENABLE:
-        theme = GetWindowTheme(hwnd);
-        if (theme) {
-            RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW);
-            return 0;
-        } else
-            return THEMING_CallOriginalClass(hwnd, msg, wParam, lParam);
-
-    case WM_MOUSEMOVE:
-    {
-        TRACKMOUSEEVENT mouse_event;
-        mouse_event.cbSize = sizeof(TRACKMOUSEEVENT);
-        mouse_event.dwFlags = TME_QUERY;
-        if(!TrackMouseEvent(&mouse_event) || !(mouse_event.dwFlags&(TME_HOVER|TME_LEAVE)))
-        {
-            mouse_event.dwFlags = TME_HOVER|TME_LEAVE;
-            mouse_event.hwndTrack = hwnd;
-            mouse_event.dwHoverTime = 1;
-            TrackMouseEvent(&mouse_event);
-        }
-        break;
-    }
-
-    case WM_MOUSEHOVER:
-    {
-        int state = (int)SendMessageW(hwnd, BM_GETSTATE, 0, 0);
-        SetWindowLongW(hwnd, 0, state|BST_HOT);
-        InvalidateRect(hwnd, NULL, FALSE);
-        break;
-    }
-
-    case WM_MOUSELEAVE:
-    {
-        int state = (int)SendMessageW(hwnd, BM_GETSTATE, 0, 0);
-        SetWindowLongW(hwnd, 0, state&(~BST_HOT));
-        InvalidateRect(hwnd, NULL, FALSE);
-        break;
-    }
-
-    case BM_SETCHECK:
-    case BM_SETSTATE:
-        theme = GetWindowTheme(hwnd);
-        if (theme) {
-            InvalidateRect(hwnd, NULL, FALSE);
-        }
-        return THEMING_CallOriginalClass(hwnd, msg, wParam, lParam);
-
-    default:
-	/* Call old proc */
-	return THEMING_CallOriginalClass(hwnd, msg, wParam, lParam);
-    }
-    return 0;
 }

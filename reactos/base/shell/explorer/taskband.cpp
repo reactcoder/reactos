@@ -21,7 +21,7 @@
 #include "precomp.h"
 
 /*****************************************************************************
- ** ITaskBand ****************************************************************
+ ** CTaskBand ****************************************************************
  *****************************************************************************/
 
 const GUID CLSID_ITaskBand = { 0x68284FAA, 0x6A48, 0x11D0, { 0x8C, 0x78, 0x00, 0xC0, 0x4F, 0xD9, 0x18, 0xB4 } };
@@ -30,7 +30,6 @@ class CTaskBand :
     public CComCoClass<CTaskBand>,
     public CComObjectRootEx<CComMultiThreadModelNoCS>,
     public IObjectWithSite,
-    public ITaskBand,
     public IDeskBand,
     public IDeskBar,
     public IPersistStream,
@@ -41,6 +40,7 @@ class CTaskBand :
     CComPtr<IUnknown> m_Site;
 
     HWND m_hWnd;
+    HWND m_hWndStartButton;
     DWORD m_BandID;
 
 public:
@@ -53,41 +53,16 @@ public:
 
     virtual ~CTaskBand() { }
 
-    virtual HRESULT STDMETHODCALLTYPE GetRebarBandID(
-        OUT DWORD *pdwBandID)
-    {
-        if (m_BandID != (DWORD) -1)
-        {
-            if (pdwBandID != NULL)
-                *pdwBandID = m_BandID;
-
-            return S_OK;
-        }
-
-        return E_FAIL;
-    }
-
     /*****************************************************************************/
 
-    virtual HRESULT STDMETHODCALLTYPE GetWindow(
-        OUT HWND *phwnd)
+    virtual HRESULT STDMETHODCALLTYPE GetWindow(OUT HWND *phwnd)
     {
-
-        /* NOTE: We have to return the tray window here so that ITaskBarClient
-                 knows the parent window of the Rebar control it creates when
-                 calling ITaskBarClient::SetDeskBarSite()! However, once we
-                 created a window we return the task switch window! */
-        if (m_hWnd != NULL)
-            *phwnd = m_hWnd;
-        else
-            *phwnd = m_Tray->GetHWND();
-
-        TRACE("ITaskBand::GetWindow(0x%p->0x%p)\n", phwnd, *phwnd);
-
-        if (*phwnd != NULL)
-            return S_OK;
-
-        return E_FAIL;
+        if (!m_hWnd)
+            return E_FAIL;
+        if (!phwnd)
+            return E_INVALIDARG;
+        *phwnd = m_hWnd;
+        return S_OK;
     }
 
     virtual HRESULT STDMETHODCALLTYPE ContextSensitiveHelp(
@@ -125,7 +100,7 @@ public:
         IN DWORD dwViewMode,
         IN OUT DESKBANDINFO *pdbi)
     {
-        TRACE("ITaskBand::GetBandInfo(0x%x,0x%x,0x%p) hWnd=0x%p\n", dwBandID, dwViewMode, pdbi, m_hWnd);
+        TRACE("CTaskBand::GetBandInfo(0x%x,0x%x,0x%p) hWnd=0x%p\n", dwBandID, dwViewMode, pdbi, m_hWnd);
 
         if (m_hWnd != NULL)
         {
@@ -150,7 +125,10 @@ public:
             }
             else
             {
-                pdbi->ptMinSize.y = GetSystemMetrics(SM_CYSIZE) + (2 * GetSystemMetrics(SM_CYEDGE)); /* FIXME: Query */
+                /* When the band is horizontal its minimum height is the height of the start button */
+                RECT rcButton;
+                GetWindowRect(m_hWndStartButton, &rcButton);
+                pdbi->ptMinSize.y = rcButton.bottom - rcButton.top;
                 pdbi->ptIntegral.y = pdbi->ptMinSize.y + (3 * GetSystemMetrics(SM_CYEDGE) / 2); /* FIXME: Query metrics */
                 /* We're not going to allow task bands where not even the minimum button size fits into the band */
                 pdbi->ptMinSize.x = pdbi->ptIntegral.y;
@@ -231,7 +209,7 @@ public:
     virtual HRESULT STDMETHODCALLTYPE GetClassID(
         OUT CLSID *pClassID)
     {
-        TRACE("ITaskBand::GetClassID(0x%p)\n", pClassID);
+        TRACE("CTaskBand::GetClassID(0x%p)\n", pClassID);
         /* We're going to return the (internal!) CLSID of the task band interface */
         *pClassID = CLSID_ITaskBand;
         return S_OK;
@@ -246,7 +224,7 @@ public:
     virtual HRESULT STDMETHODCALLTYPE Load(
         IN IStream *pStm)
     {
-        TRACE("ITaskBand::Load called\n");
+        TRACE("CTaskBand::Load called\n");
         /* Nothing to do */
         return S_OK;
     }
@@ -262,7 +240,7 @@ public:
     virtual HRESULT STDMETHODCALLTYPE GetSizeMax(
         OUT ULARGE_INTEGER *pcbSize)
     {
-        TRACE("ITaskBand::GetSizeMax called\n");
+        TRACE("CTaskBand::GetSizeMax called\n");
         /* We don't need any space for the task band */
         pcbSize->QuadPart = 0;
         return S_OK;
@@ -275,7 +253,7 @@ public:
         HRESULT hRet;
         HWND hwndSite;
 
-        TRACE("ITaskBand::SetSite(0x%p)\n", pUnkSite);
+        TRACE("CTaskBand::SetSite(0x%p)\n", pUnkSite);
 
         hRet = IUnknown_GetWindow(pUnkSite, &hwndSite);
         if (FAILED(hRet))
@@ -303,7 +281,7 @@ public:
         IN REFIID riid,
         OUT VOID **ppvSite)
     {
-        TRACE("ITaskBand::GetSite(0x%p,0x%p)\n", riid, ppvSite);
+        TRACE("CTaskBand::GetSite(0x%p,0x%p)\n", riid, ppvSite);
 
         if (m_Site != NULL)
         {
@@ -323,7 +301,7 @@ public:
         IN LPARAM lParam,
         OUT LRESULT *plrResult)
     {
-        TRACE("ITaskBand: IWinEventHandler::ProcessMessage(0x%p, 0x%x, 0x%p, 0x%p, 0x%p)\n", hWnd, uMsg, wParam, lParam, plrResult);
+        TRACE("CTaskBand: IWinEventHandler::ProcessMessage(0x%p, 0x%x, 0x%p, 0x%p, 0x%p)\n", hWnd, uMsg, wParam, lParam, plrResult);
         return E_NOTIMPL;
     }
 
@@ -333,7 +311,7 @@ public:
         if (hWnd == m_hWnd ||
             IsChild(m_hWnd, hWnd))
         {
-            TRACE("ITaskBand::ContainsWindow(0x%p) returns S_OK\n", hWnd);
+            TRACE("CTaskBand::ContainsWindow(0x%p) returns S_OK\n", hWnd);
             return S_OK;
         }
 
@@ -353,10 +331,11 @@ public:
 
     /*****************************************************************************/
 
-    HRESULT STDMETHODCALLTYPE _Init(IN OUT ITrayWindow *tray)
+    HRESULT STDMETHODCALLTYPE Initialize(IN OUT ITrayWindow *tray, HWND hWndStartButton)
     {
         m_Tray = tray;
         m_BandID = (DWORD) -1;
+        m_hWndStartButton = hWndStartButton;
         return S_OK;
     }
 
@@ -374,21 +353,7 @@ public:
     END_COM_MAP()
 };
 
-ITaskBand * CreateTaskBand(IN OUT ITrayWindow *Tray)
+HRESULT CTaskBand_CreateInstance(IN ITrayWindow *Tray, HWND hWndStartButton, REFIID riid, void **ppv)
 {
-    HRESULT hr;
-
-    CTaskBand * tb = new CComObject<CTaskBand>();
-
-    if (!tb)
-        return NULL;
-
-    hr = tb->AddRef();
-
-    hr = tb->_Init(Tray);
-
-    if (FAILED_UNEXPECTEDLY(hr))
-        tb->Release();
-
-    return tb;
+    return ShellObjectCreatorInit<CTaskBand>(Tray, hWndStartButton, riid, ppv);
 }

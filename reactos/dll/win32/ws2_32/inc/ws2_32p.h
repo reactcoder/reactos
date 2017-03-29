@@ -98,7 +98,7 @@ typedef struct _TCATALOG
     DWORD UniqueId;
     DWORD NextId;
     HKEY CatalogKey;
-    RTL_CRITICAL_SECTION Lock;
+    CRITICAL_SECTION Lock;
     BOOLEAN Initialized;
 } TCATALOG, *PTCATALOG;
 
@@ -139,7 +139,7 @@ typedef struct _NSCATALOG
     DWORD ItemCount;
     DWORD UniqueId;
     HKEY CatalogKey;
-    RTL_CRITICAL_SECTION Lock;
+    CRITICAL_SECTION Lock;
 } NSCATALOG, *PNSCATALOG;
 
 typedef struct _NSQUERY
@@ -149,7 +149,7 @@ typedef struct _NSQUERY
     BOOLEAN ShuttingDown;
     LIST_ENTRY ProviderList;
     PNSQUERY_PROVIDER ActiveProvider;
-    RTL_CRITICAL_SECTION Lock;
+    CRITICAL_SECTION Lock;
     PNSQUERY_PROVIDER CurrentProvider;
     LPWSAQUERYSETW QuerySet;
     DWORD ControlFlags;
@@ -169,7 +169,7 @@ typedef struct _WSPROCESS
     HANDLE NamespaceCatalogEvent;
     DWORD Version;
     BOOLEAN LockReady;
-    RTL_CRITICAL_SECTION ThreadLock;
+    CRITICAL_SECTION ThreadLock;
 } WSPROCESS, *PWSPROCESS;
 
 typedef struct _WSTHREAD
@@ -270,11 +270,11 @@ extern PWS_SOCK_POST_ROUTINE WsSockPostRoutine;
 
 LPSTR
 WSAAPI
-AnsiDupFromUnicode(IN LPWSTR UnicodeString);
+AnsiDupFromUnicode(IN LPCWSTR UnicodeString);
 
 LPWSTR
 WSAAPI
-UnicodeDupFromAnsi(IN LPSTR AnsiString);
+UnicodeDupFromAnsi(IN LPCSTR AnsiString);
 
 VOID
 WSAAPI
@@ -315,9 +315,9 @@ MapAnsiQuerySetToUnicode(IN LPWSAQUERYSETA AnsiSet,
 
 INT
 WSAAPI
-MapUnicodeQuerySetToAnsi(OUT LPWSAQUERYSETW UnicodeSet,
+MapUnicodeQuerySetToAnsi(IN LPWSAQUERYSETW UnicodeSet,
                          IN OUT PSIZE_T SetSize,
-                         IN LPWSAQUERYSETA AnsiSet);
+                         OUT LPWSAQUERYSETA AnsiSet);
 
 INT
 WSAAPI
@@ -435,7 +435,7 @@ WSAAPI
 WsNcEntrySetProvider(IN PNSCATALOG_ENTRY Entry,
                      IN PNS_PROVIDER Provider);
 
-DWORD
+BOOL
 WSAAPI
 WsNqAddProvider(
     IN PNSQUERY NsQuery,
@@ -490,6 +490,13 @@ WsNqNextProvider(
     IN PNSQUERY_PROVIDER Provider
 );
 
+PNSQUERY_PROVIDER
+WSAAPI
+WsNqPreviousProvider(
+    IN PNSQUERY Query,
+    IN PNSQUERY_PROVIDER Provider
+);
+
 VOID
 WSAAPI
 WsNqDereference(IN PNSQUERY Query);
@@ -497,11 +504,6 @@ WsNqDereference(IN PNSQUERY Query);
 BOOL
 WSAAPI
 WsNqValidateAndReference(IN PNSQUERY Query);
-
-PNSQUERY_PROVIDER
-WSAAPI
-WsNqPreviousProvider(IN PNSQUERY Query,
-                     IN PNSQUERY_PROVIDER Provider);
 
 DWORD
 WSAAPI
@@ -537,7 +539,7 @@ WsNqProvLookupServiceBegin(
     IN PNSQUERY_PROVIDER QueryProvider,
     IN LPWSAQUERYSETW QuerySet,
     IN LPWSASERVICECLASSINFOW ServiceClassInfo,
-    IN DWORD 
+    IN DWORD
 );
 
 VOID

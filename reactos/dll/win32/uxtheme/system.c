@@ -57,7 +57,7 @@ PTHEME_FILE ActiveThemeFile;
 
 static BOOL CALLBACK UXTHEME_broadcast_msg_enumchild (HWND hWnd, LPARAM msg)
 {
-    PostMessageW(hWnd, msg, 0, 0);
+    SendMessageW(hWnd, msg, 0, 0);
     return TRUE;
 }
 
@@ -70,7 +70,7 @@ BOOL CALLBACK UXTHEME_broadcast_msg (HWND hWnd, LPARAM msg)
     }
     else
     {
-	PostMessageW(hWnd, msg, 0, 0);
+	SendMessageW(hWnd, msg, 0, 0);
 	EnumChildWindows (hWnd, UXTHEME_broadcast_msg_enumchild, msg);
     }
     return TRUE;
@@ -667,14 +667,31 @@ static HRESULT UXTHEME_SetWindowProperty(HWND hwnd, ATOM aProp, LPCWSTR pszValue
 {
     ATOM oldValue = (ATOM)(size_t)RemovePropW(hwnd, (LPCWSTR)MAKEINTATOM(aProp));
     if(oldValue)
+    {
         DeleteAtom(oldValue);
-    if(pszValue) {
-        ATOM atValue = AddAtomW(pszValue);
-        if(!atValue
-           || !SetPropW(hwnd, (LPCWSTR)MAKEINTATOM(aProp), (LPWSTR)MAKEINTATOM(atValue))) {
-            HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
+    }
+
+    if(pszValue) 
+    {
+        ATOM atValue;
+
+        /* A string with zero lenght is not acceptatble in AddAtomW but we want to support
+           users passing an empty string meaning they want no theme for the specified window */
+        if(!pszValue[0])
+            pszValue = L"0";
+
+        atValue = AddAtomW(pszValue);
+        if (!atValue)
+        {
+            ERR("AddAtomW for %S failed with last error %d!\n", pszValue, GetLastError());
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+
+        if (!SetPropW(hwnd, (LPCWSTR)MAKEINTATOM(aProp), (LPWSTR)MAKEINTATOM(atValue)))
+        {
+            ERR("SetPropW for atom %d failed with last error %d\n", aProp, GetLastError());
             if(atValue) DeleteAtom(atValue);
-            return hr;
+            return HRESULT_FROM_WIN32(GetLastError());
         }
     }
     return S_OK;
@@ -879,6 +896,8 @@ HRESULT WINAPI CloseThemeData(HTHEME hTheme)
 {
     TRACE("(%p)\n", hTheme);
     if(!hTheme || hTheme == INVALID_HANDLE_VALUE)
+        return E_HANDLE;
+    if(IsBadReadPtr (hTheme, sizeof(THEME_CLASS))) /* This check is a hack! */
         return E_HANDLE;
     return MSSTYLES_CloseThemeClass(hTheme);
 }

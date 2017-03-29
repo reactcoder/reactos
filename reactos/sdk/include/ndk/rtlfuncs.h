@@ -619,15 +619,26 @@ RtlAddVectoredExceptionHandler(
     _In_ PVECTORED_EXCEPTION_HANDLER VectoredHandler
 );
 
-__analysis_noreturn
 NTSYSAPI
-VOID
+ULONG
 NTAPI
-RtlAssert(
-    _In_ PVOID FailedAssertion,
-    _In_ PVOID FileName,
-    _In_ ULONG LineNumber,
-    _In_opt_z_ PCHAR Message
+RtlRemoveVectoredExceptionHandler(
+    _In_ PVOID VectoredHandlerHandle
+);
+
+NTSYSAPI
+PVOID
+NTAPI
+RtlAddVectoredContinueHandler(
+    _In_ ULONG FirstHandler,
+    _In_ PVECTORED_EXCEPTION_HANDLER VectoredHandler
+);
+
+NTSYSAPI
+ULONG
+NTAPI
+RtlRemoveVectoredContinueHandler(
+    _In_ PVOID VectoredHandlerHandle
 );
 
 NTSYSAPI
@@ -642,6 +653,17 @@ LONG
 NTAPI
 RtlUnhandledExceptionFilter(
     _In_ struct _EXCEPTION_POINTERS* ExceptionInfo
+);
+
+__analysis_noreturn
+NTSYSAPI
+VOID
+NTAPI
+RtlAssert(
+    _In_ PVOID FailedAssertion,
+    _In_ PVOID FileName,
+    _In_ ULONG LineNumber,
+    _In_opt_z_ PCHAR Message
 );
 
 NTSYSAPI
@@ -1047,6 +1069,8 @@ RtlWalkHeap(
 #define RtlGetProcessHeap() (NtCurrentPeb()->ProcessHeap)
 
 #endif // NTOS_MODE_USER
+
+#define NtCurrentPeb() (NtCurrentTeb()->ProcessEnvironmentBlock)
 
 NTSYSAPI
 SIZE_T
@@ -2312,6 +2336,60 @@ RtlValidateUnicodeString(
     _In_ PCUNICODE_STRING String
 );
 
+#define RTL_SKIP_BUFFER_COPY    0x00000001
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlpEnsureBufferSize(
+    _In_ ULONG Flags,
+    _Inout_ PRTL_BUFFER Buffer,
+    _In_ SIZE_T RequiredSize
+);
+
+#ifdef NTOS_MODE_USER
+
+FORCEINLINE
+VOID
+RtlInitBuffer(
+    _Inout_ PRTL_BUFFER Buffer,
+    _In_ PUCHAR Data,
+    _In_ ULONG DataSize
+)
+{
+    Buffer->Buffer = Buffer->StaticBuffer = Data;
+    Buffer->Size = Buffer->StaticSize = DataSize;
+    Buffer->ReservedForAllocatedSize = 0;
+    Buffer->ReservedForIMalloc = NULL;
+}
+
+FORCEINLINE
+NTSTATUS
+RtlEnsureBufferSize(
+    _In_ ULONG Flags,
+    _Inout_ PRTL_BUFFER Buffer,
+    _In_ ULONG RequiredSize
+)
+{
+    if (Buffer && RequiredSize <= Buffer->Size)
+        return STATUS_SUCCESS;
+    return RtlpEnsureBufferSize(Flags, Buffer, RequiredSize);
+}
+
+FORCEINLINE
+VOID
+RtlFreeBuffer(
+    _Inout_ PRTL_BUFFER Buffer
+)
+{
+    if (Buffer->Buffer != Buffer->StaticBuffer && Buffer->Buffer)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer->Buffer);
+    Buffer->Buffer = Buffer->StaticBuffer;
+    Buffer->Size = Buffer->StaticSize;
+}
+
+#endif /* NTOS_MODE_USER */
+
 //
 // Ansi String Functions
 //
@@ -2626,7 +2704,6 @@ RtlGetCurrentProcessorNumber(
     VOID
 );
 
-#define NtCurrentPeb() (NtCurrentTeb()->ProcessEnvironmentBlock)
 
 //
 // Thread Pool Functions
@@ -2761,6 +2838,23 @@ RtlDosPathNameToNtPathName_U(
     _Out_opt_ PCWSTR *NtFileNamePart,
     _Out_opt_ PRTL_RELATIVE_NAME_U DirectoryInfo
 );
+
+
+#define RTL_UNCHANGED_UNK_PATH  1
+#define RTL_CONVERTED_UNC_PATH  2
+#define RTL_CONVERTED_NT_PATH   3
+#define RTL_UNCHANGED_DOS_PATH  4
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlNtPathNameToDosPathName(
+    _In_ ULONG Flags,
+    _Inout_ PRTL_UNICODE_STRING_BUFFER Path,
+    _Out_opt_ PULONG PathType,
+    _Out_opt_ PULONG Unknown
+);
+
 
 NTSYSAPI
 BOOLEAN
@@ -3136,6 +3230,14 @@ RtlClearAllBits(
 NTSYSAPI
 VOID
 NTAPI
+RtlClearBit(
+    _In_ PRTL_BITMAP BitMapHeader,
+    _In_range_(<, BitMapHeader->SizeOfBitMap) ULONG BitNumber
+);
+
+NTSYSAPI
+VOID
+NTAPI
 RtlClearBits(
     _In_ PRTL_BITMAP BitMapHeader,
     _In_range_(0, BitMapHeader->SizeOfBitMap - NumberToClear) ULONG StartingIndex,
@@ -3192,6 +3294,14 @@ CCHAR
 NTAPI
 RtlFindLeastSignificantBit(
     _In_ ULONGLONG Value
+);
+
+NTSYSAPI
+ULONG
+NTAPI
+RtlFindLongestRunClear(
+    _In_ PRTL_BITMAP BitMapHeader,
+    _Out_ PULONG StartingIndex
 );
 
 NTSYSAPI
@@ -3296,6 +3406,20 @@ RtlTestBit(
     _In_ PRTL_BITMAP BitMapHeader,
     _In_range_(<, BitMapHeader->SizeOfBitMap) ULONG BitNumber
 );
+
+#if defined(_M_AMD64)
+_Must_inspect_result_
+FORCEINLINE
+BOOLEAN
+RtlCheckBit(
+  _In_ PRTL_BITMAP BitMapHeader,
+  _In_range_(<, BitMapHeader->SizeOfBitMap) ULONG BitPosition)
+{
+  return BitTest64((LONG64 CONST*)BitMapHeader->Buffer, (LONG64)BitPosition);
+}
+#else
+#define RtlCheckBit(BMH,BP) (((((PLONG)(BMH)->Buffer)[(BP)/32]) >> ((BP)%32)) & 0x1)
+#endif /* defined(_M_AMD64) */
 
 //
 // Timer Functions

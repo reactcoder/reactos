@@ -15,8 +15,8 @@
 
 /* DATA **********************************************************************/
 
-#define WsTcLock()          EnterCriticalSection((LPCRITICAL_SECTION)&Catalog->Lock);
-#define WsTcUnlock()        LeaveCriticalSection((LPCRITICAL_SECTION)&Catalog->Lock);
+#define WsTcLock()          EnterCriticalSection(&Catalog->Lock)
+#define WsTcUnlock()        LeaveCriticalSection(&Catalog->Lock)
 
 /* FUNCTIONS *****************************************************************/
 
@@ -25,7 +25,7 @@ WSAAPI
 WsTcAllocate(VOID)
 {
     PTCATALOG Catalog;
-    
+
     /* Allocate the object */
     Catalog = HeapAlloc(WsSockHeap, HEAP_ZERO_MEMORY, sizeof(*Catalog));
 
@@ -49,7 +49,7 @@ WsTcOpen(IN PTCATALOG Catalog,
     CHAR* CatalogKeyName;
 
     /* Initialize the catalog lock and namespace list */
-    InitializeCriticalSection((LPCRITICAL_SECTION)&Catalog->Lock);
+    InitializeCriticalSection(&Catalog->Lock);
     InitializeListHead(&Catalog->ProtocolList);
 
     /* Read the catalog name */
@@ -283,7 +283,7 @@ WsTcRefreshFromRegistry(IN PTCATALOG Catalog,
             ErrorCode = WSASYSCALLFAILURE;
             break;
         }
-        
+
         /* Get the next entry */
         ErrorCode = RegQueryValueEx(Catalog->CatalogKey,
                                     "Next_Catalog_Entry_ID",
@@ -313,7 +313,7 @@ WsTcRefreshFromRegistry(IN PTCATALOG Catalog,
         }
 
         /* Initialize them all */
-        for (i = 1; i <= CatalogEntries; i++) 
+        for (i = 1; i <= CatalogEntries; i++)
         {
             /* Allocate a Catalog Entry Structure */
             CatalogEntry = WsTcEntryAllocate();
@@ -384,7 +384,7 @@ WsTcGetEntryFromAf(IN PTCATALOG Catalog,
                    IN PTCATALOG_ENTRY *CatalogEntry)
 {
     INT ErrorCode = WSAEINVAL;
-    PLIST_ENTRY NextEntry = Catalog->ProtocolList.Flink;
+    PLIST_ENTRY NextEntry;
     PTCATALOG_ENTRY Entry;
 
     /* Assume failure */
@@ -394,6 +394,7 @@ WsTcGetEntryFromAf(IN PTCATALOG Catalog,
     WsTcLock();
 
     /* Match the Id with all the entries in the List */
+    NextEntry = Catalog->ProtocolList.Flink;
     while (NextEntry != &Catalog->ProtocolList)
     {
         /* Get the Current Entry */
@@ -435,13 +436,14 @@ WsTcGetEntryFromCatalogEntryId(IN PTCATALOG Catalog,
                                IN PTCATALOG_ENTRY *CatalogEntry)
 {
     INT ErrorCode = WSAEINVAL;
-    PLIST_ENTRY NextEntry = Catalog->ProtocolList.Flink;
+    PLIST_ENTRY NextEntry;
     PTCATALOG_ENTRY Entry;
 
     /* Lock the catalog */
     WsTcLock();
 
     /* Match the Id with all the entries in the List */
+    NextEntry = Catalog->ProtocolList.Flink;
     while (NextEntry != &Catalog->ProtocolList)
     {
         /* Get the Current Entry */
@@ -483,7 +485,7 @@ WsTcGetEntryFromTriplet(IN PTCATALOG Catalog,
                         IN PTCATALOG_ENTRY *CatalogEntry)
 {
     INT ErrorCode = WSAEINVAL;
-    PLIST_ENTRY NextEntry = Catalog->ProtocolList.Flink;
+    PLIST_ENTRY NextEntry;
     PTCATALOG_ENTRY Entry;
     DPRINT("WsTcGetEntryFromTriplet: %lx, %lx, %lx, %lx\n", af, type, protocol, StartId);
 
@@ -492,6 +494,8 @@ WsTcGetEntryFromTriplet(IN PTCATALOG Catalog,
 
     /* Lock the catalog */
     WsTcLock();
+
+    NextEntry = Catalog->ProtocolList.Flink;
 
     /* Check if we are starting past 0 */
     if (StartId)
@@ -517,13 +521,13 @@ WsTcGetEntryFromTriplet(IN PTCATALOG Catalog,
 
         /* Check if Address Family Matches or if it's wildcard */
         if ((Entry->ProtocolInfo.iAddressFamily == af) || (af == AF_UNSPEC))
-        {    
+        {
             /* Check if Socket Type Matches or if it's wildcard */
             if ((Entry->ProtocolInfo.iSocketType == type) || (type == 0))
             {
                 /* Check if Protocol is In Range or if it's wildcard */
-                if (((Entry->ProtocolInfo.iProtocol <= protocol) && 
-                    ((Entry->ProtocolInfo.iProtocol + 
+                if (((Entry->ProtocolInfo.iProtocol <= protocol) &&
+                    ((Entry->ProtocolInfo.iProtocol +
                       Entry->ProtocolInfo.iProtocolMaxOffset) >= protocol)) ||
                     (protocol == 0))
                 {
@@ -542,18 +546,18 @@ WsTcGetEntryFromTriplet(IN PTCATALOG Catalog,
                     *CatalogEntry = Entry;
                     ErrorCode = ERROR_SUCCESS;
                     break;
-                } 
-                else 
+                }
+                else
                 {
                     ErrorCode = WSAEPROTONOSUPPORT;
                 }
-            } 
-            else 
+            }
+            else
             {
                 ErrorCode = WSAESOCKTNOSUPPORT;
             }
-        } 
-        else 
+        }
+        else
         {
             ErrorCode = WSAEAFNOSUPPORT;
         }
@@ -587,10 +591,8 @@ WsTcFindProvider(IN PTCATALOG Catalog,
         Provider = CatalogEntry->Provider;
 
         /* Check for a match */
-        if ((Provider) &&
-            !(memcmp(&CatalogEntry->ProtocolInfo.ProviderId,
-                    ProviderId,
-                    sizeof(GUID))))
+        if (Provider &&
+            IsEqualGUID(&CatalogEntry->ProtocolInfo.ProviderId, ProviderId))
         {
             /* Found a match */
             return Provider;
@@ -674,14 +676,14 @@ WsTcUpdateProtocolList(IN PTCATALOG Catalog,
     RemoveEntryList(&Catalog->ProtocolList);
     InitializeListHead(&Catalog->ProtocolList);
 
-    /* Loop every item on the list */
+    /* Loop every item in the list */
     while (!IsListEmpty(List))
     {
         /* Get the catalog entry */
         Entry = RemoveHeadList(List);
         CatalogEntry = CONTAINING_RECORD(Entry, TCATALOG_ENTRY, CatalogLink);
 
-        /* Check if this item is already on our list */
+        /* Check if this item is already in our list */
         Entry = TempList.Flink;
         while (Entry != &TempList)
         {
@@ -709,7 +711,7 @@ WsTcUpdateProtocolList(IN PTCATALOG Catalog,
         Catalog->ItemCount++;
     }
 
-    /* If there's anything left on the temporary list */
+    /* If there's anything left in the temporary list */
     while (!IsListEmpty(&TempList))
     {
         /* Get the entry */
@@ -759,7 +761,7 @@ WsTcFindIfsProviderForSocket(IN PTCATALOG Catalog,
     PTPROVIDER Provider;
     IN SOCKET NewHandle;
     INT Error;
-    DWORD OptionLength;
+    INT OptionLength;
     PLIST_ENTRY Entry;
     WSAPROTOCOL_INFOW ProtocolInfo;
     DWORD UniqueId;
@@ -790,7 +792,7 @@ CatalogChanged:
         {
             /* Load it */
             ErrorCode = WsTcLoadProvider(Catalog, CatalogEntry);
-            
+
             /* Skip it if we failed to load it */
             if (ErrorCode != ERROR_SUCCESS) continue;
 
@@ -811,7 +813,7 @@ CatalogChanged:
                                                       SOL_SOCKET,
                                                       SO_PROTOCOL_INFOW,
                                                       (PCHAR)&ProtocolInfo,
-                                                      (LPINT)&OptionLength,
+                                                      &OptionLength,
                                                       &Error);
 
         /* Dereference the entry and check the result */
@@ -830,7 +832,7 @@ CatalogChanged:
         NewHandle = WPUModifyIFSHandle(ProtocolInfo.dwCatalogEntryId,
                                        Handle,
                                        &Error);
-        
+
         /* Check if the socket is invalid */
         if (NewHandle == INVALID_SOCKET) return WSAENOTSOCK;
 
@@ -875,10 +877,8 @@ WsTcDelete(IN PTCATALOG Catalog)
         /* Get this entry */
         CatalogEntry = CONTAINING_RECORD(Entry, TCATALOG_ENTRY, CatalogLink);
 
-        /* Remove it */
+        /* Remove it and dereference it */
         WsTcRemoveCatalogItem(Catalog, CatalogEntry);
-
-        /* Dereference it */
         WsTcEntryDereference(CatalogEntry);
 
         /* Move to the next entry */
@@ -895,7 +895,7 @@ WsTcDelete(IN PTCATALOG Catalog)
 
     /* Release and delete the lock */
     WsTcUnlock();
-    DeleteCriticalSection((LPCRITICAL_SECTION)&Catalog->Lock);
+    DeleteCriticalSection(&Catalog->Lock);
 
     /* Delete the object */
     HeapFree(WsSockHeap, 0, Catalog);

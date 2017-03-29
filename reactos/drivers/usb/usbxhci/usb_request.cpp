@@ -819,7 +819,7 @@ CUSBRequest::BuildSetupPacketFromURB()
     case URB_FUNCTION_CLEAR_FEATURE_TO_DEVICE:
     case URB_FUNCTION_CLEAR_FEATURE_TO_INTERFACE:
     case URB_FUNCTION_CLEAR_FEATURE_TO_ENDPOINT:
-        UNIMPLEMENTED
+        UNIMPLEMENTED;
             break;
 
         /* GET CONFIG */
@@ -887,7 +887,7 @@ CUSBRequest::BuildSetupPacketFromURB()
     case URB_FUNCTION_SET_DESCRIPTOR_TO_DEVICE:
     case URB_FUNCTION_SET_DESCRIPTOR_TO_INTERFACE:
     case URB_FUNCTION_SET_DESCRIPTOR_TO_ENDPOINT:
-        UNIMPLEMENTED
+        UNIMPLEMENTED;
             break;
 
         /* SET FEATURE */
@@ -923,10 +923,10 @@ CUSBRequest::BuildSetupPacketFromURB()
 
         /* SYNC FRAME */
     case URB_FUNCTION_SYNC_RESET_PIPE_AND_CLEAR_STALL:
-        UNIMPLEMENTED
+        UNIMPLEMENTED;
             break;
     default:
-        UNIMPLEMENTED
+        UNIMPLEMENTED;
             break;
     }
 

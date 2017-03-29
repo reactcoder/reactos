@@ -15,8 +15,8 @@
 
 /* DATA **********************************************************************/
 
-#define WsNcLock()          EnterCriticalSection((LPCRITICAL_SECTION)&Catalog->Lock);
-#define WsNcUnlock()        LeaveCriticalSection((LPCRITICAL_SECTION)&Catalog->Lock);
+#define WsNcLock()          EnterCriticalSection(&Catalog->Lock)
+#define WsNcUnlock()        LeaveCriticalSection(&Catalog->Lock)
 
 /* FUNCTIONS *****************************************************************/
 
@@ -48,7 +48,7 @@ WsNcOpen(IN PNSCATALOG Catalog,
     CHAR* CatalogKeyName;
 
     /* Initialize the catalog lock and namespace list */
-    InitializeCriticalSection((LPCRITICAL_SECTION)&Catalog->Lock);
+    InitializeCriticalSection(&Catalog->Lock);
     InitializeListHead(&Catalog->CatalogList);
 
     /* Read the catalog name */
@@ -282,7 +282,7 @@ WsNcRefreshFromRegistry(IN PNSCATALOG Catalog,
         }
 
         /* Initialize them all */
-        for (i = 1; i <= CatalogEntries; i++) 
+        for (i = 1; i <= CatalogEntries; i++)
         {
             /* Allocate a Catalog Entry Structure */
             CatalogEntry = WsNcEntryAllocate();
@@ -370,7 +370,7 @@ WsNcEnumerateCatalogItems(IN PNSCATALOG Catalog,
         GoOn = Callback(Context, CatalogEntry);
     }
 
-    /* Release lock */
+    /* Release the lock */
     WsNcUnlock();
 }
 
@@ -396,12 +396,12 @@ WsNcLoadProvider(IN PNSCATALOG Catalog,
                                        CatalogEntry->DllPath,
                                        &CatalogEntry->ProviderId);
 
-                /* Ensure success */
-                if (ErrorCode == ERROR_SUCCESS)
-                {
-                    /* Set the provider */
-                    WsNcEntrySetProvider(CatalogEntry, Provider);
-                }
+            /* Ensure success */
+            if (ErrorCode == ERROR_SUCCESS)
+            {
+                /* Set the provider */
+                WsNcEntrySetProvider(CatalogEntry, Provider);
+            }
 
             /* Dereference it */
             WsNpDereference(Provider);
@@ -413,7 +413,7 @@ WsNcLoadProvider(IN PNSCATALOG Catalog,
         }
     }
 
-    /* Release the lock */
+    /* Release the lock and return */
     WsNcUnlock();
     return ErrorCode;
 }
@@ -459,9 +459,8 @@ WsNcUpdateNamespaceList(IN PNSCATALOG Catalog,
             Entry = Entry->Flink;
 
             /* Check if they match */
-            if (memcmp(&CatalogEntry->ProviderId,
-                       &OldCatalogEntry->ProviderId,
-                       sizeof(GUID)))
+            if (IsEqualGUID(&CatalogEntry->ProviderId,
+                            &OldCatalogEntry->ProviderId))
             {
                 /* We have a match, use the old item instead */
                 WsNcEntryDereference(CatalogEntry);
@@ -498,13 +497,15 @@ WsNcGetCatalogFromProviderId(IN PNSCATALOG Catalog,
                              IN LPGUID ProviderId,
                              OUT PNSCATALOG_ENTRY *CatalogEntry)
 {
-    PLIST_ENTRY NextEntry = Catalog->CatalogList.Flink;
+    INT ErrorCode = WSAEINVAL;
+    PLIST_ENTRY NextEntry;
     PNSCATALOG_ENTRY Entry;
 
     /* Lock the catalog */
     WsNcLock();
 
     /* Match the Id with all the entries in the List */
+    NextEntry = Catalog->CatalogList.Flink;
     while (NextEntry != &Catalog->CatalogList)
     {
         /* Get the Current Entry */
@@ -512,27 +513,26 @@ WsNcGetCatalogFromProviderId(IN PNSCATALOG Catalog,
         NextEntry = NextEntry->Flink;
 
         /* Check if this is the Catalog Entry ID we want */
-        if (!(memcmp(&Entry->ProviderId, ProviderId, sizeof(GUID))))
+        if (IsEqualGUID(&Entry->ProviderId, ProviderId))
         {
-            /* Check if it doesn't already have a provider */
+            /* If it doesn't already have a provider, load the provider */
             if (!Entry->Provider)
-            {
-                /* Match, load the Provider */
-                WsNcLoadProvider(Catalog, Entry);
-            }
+                ErrorCode = WsNcLoadProvider(Catalog, Entry);
 
-            /* Reference the entry and return it */
-            InterlockedIncrement(&Entry->RefCount);
-            *CatalogEntry = Entry;
-            break;
+            /* If we succeeded, reference the entry and return it */
+            if (Entry->Provider /* || ErrorCode == ERROR_SUCCESS */)
+            {
+                InterlockedIncrement(&Entry->RefCount);
+                *CatalogEntry = Entry;
+                ErrorCode = ERROR_SUCCESS;
+                break;
+            }
         }
     }
 
-    /* Release the catalog */
+    /* Release the lock and return */
     WsNcUnlock();
-
-    /* Return */
-    return ERROR_SUCCESS;
+    return ErrorCode;
 }
 
 BOOL
@@ -618,10 +618,8 @@ WsNcDelete(IN PNSCATALOG Catalog)
         /* Get this entry */
         CatalogEntry = CONTAINING_RECORD(Entry, NSCATALOG_ENTRY, CatalogLink);
 
-        /* Remove it */
+        /* Remove it and dereference it */
         WsNcRemoveCatalogItem(Catalog, CatalogEntry);
-
-        /* Dereference it */
         WsNcEntryDereference(CatalogEntry);
 
         /* Move to the next entry */
@@ -638,7 +636,7 @@ WsNcDelete(IN PNSCATALOG Catalog)
 
     /* Release and delete the lock */
     WsNcUnlock();
-    DeleteCriticalSection((LPCRITICAL_SECTION)&Catalog->Lock);
+    DeleteCriticalSection(&Catalog->Lock);
 
     /* Delete the object */
     HeapFree(WsSockHeap, 0, Catalog);

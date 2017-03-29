@@ -602,6 +602,7 @@ LRESULT co_UserFreeWindow(PWND Window,
       MsqDecPaintCountQueue(Window->head.pti);
       if (Window->hrgnUpdate > HRGN_WINDOW && GreIsHandleValid(Window->hrgnUpdate))
       {
+         IntGdiSetRegionOwner(Window->hrgnUpdate, GDI_OBJ_HMGR_POWNED);
          GreDeleteObject(Window->hrgnUpdate);
       }
       Window->hrgnUpdate = NULL;
@@ -1124,8 +1125,7 @@ co_IntSetParent(PWND Wnd, PWND WndNewParent)
       /* Link the window with its new siblings */
       IntLinkHwnd( Wnd,
                   ((0 == (Wnd->ExStyle & WS_EX_TOPMOST) &&
-                    WndNewParent == UserGetDesktopWindow() ) ? HWND_TOP : HWND_TOPMOST ) );
-
+                    UserIsDesktopWindow(WndNewParent) ) ? HWND_TOP : HWND_TOPMOST ) );
    }
 
    if ( WndNewParent == co_GetDesktopWindow(Wnd) &&
@@ -1157,7 +1157,7 @@ co_IntSetParent(PWND Wnd, PWND WndNewParent)
       }
    }
 
-   if (WndOldParent == UserGetMessageWindow() || WndNewParent == UserGetMessageWindow())
+   if (UserIsMessageWindow(WndOldParent) || UserIsMessageWindow(WndNewParent))
       swFlags |= SWP_NOACTIVATE;
 
    IntNotifyWinEvent(EVENT_OBJECT_PARENTCHANGE, Wnd ,OBJID_WINDOW, CHILDID_SELF, WEF_SETBYWNDPTI);
@@ -1436,7 +1436,7 @@ static void IntSendParentNotify( PWND pWindow, UINT msg )
     if ( (pWindow->style & (WS_CHILD | WS_POPUP)) == WS_CHILD &&
          !(pWindow->ExStyle & WS_EX_NOPARENTNOTIFY))
     {
-        if (VerifyWnd(pWindow->spwndParent) && pWindow->spwndParent != UserGetDesktopWindow())
+        if (VerifyWnd(pWindow->spwndParent) && !UserIsDesktopWindow(pWindow->spwndParent))
         {
             USER_REFERENCE_ENTRY Ref;
             UserRefObjectCo(pWindow->spwndParent, &Ref);
@@ -2251,7 +2251,7 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
    IntSendParentNotify(Window, WM_CREATE);
 
    /* Notify the shell that a new window was created */
-   if (Window->spwndParent == UserGetDesktopWindow() &&
+   if (UserIsDesktopWindow(Window->spwndParent) &&
        Window->spwndOwner == NULL &&
        (Window->style & WS_VISIBLE) &&
        (!(Window->ExStyle & WS_EX_TOOLWINDOW) ||
@@ -2807,7 +2807,7 @@ IntFindWindow(PWND Parent,
          /* Do not send WM_GETTEXT messages in the kernel mode version!
             The user mode version however calls GetWindowText() which will
             send WM_GETTEXT messages to windows belonging to its processes */
-         if (!ClassAtom || Child->pcls->atomClassName == ClassAtom)
+         if (!ClassAtom || Child->pcls->atomNVClassName == ClassAtom)
          {
              // FIXME: LARGE_STRING truncated
              CurrentWindowName.Buffer = Child->strName.Buffer;
@@ -2999,7 +2999,7 @@ NtUserFindWindowEx(HWND hwndParent,
                                 (TopLevelWindow->strName.Length < 0xFFFF &&
                                  !RtlCompareUnicodeString(&WindowName, &ustr, TRUE));
                 ClassMatches = (ClassAtom == (RTL_ATOM)0) ||
-                               ClassAtom == TopLevelWindow->pcls->atomClassName;
+                               ClassAtom == TopLevelWindow->pcls->atomNVClassName;
 
                 if (WindowMatches && ClassMatches)
                 {
@@ -3021,7 +3021,7 @@ NtUserFindWindowEx(HWND hwndParent,
        }
        else
        {
-          ERR("FindWindowEx: Not Desktop Parent!\n");
+          TRACE("FindWindowEx: Not Desktop Parent!\n");
           Ret = IntFindWindow(Parent, ChildAfter, ClassAtom, &WindowName);
        }
 
@@ -3451,7 +3451,7 @@ NtUserSetShellWindowEx(HWND hwndShell, HWND hwndListView)
       RETURN(FALSE);
    }
 
-   if(!(WndListView = UserGetWindowObject(hwndListView)))
+   if (!(WndListView = UserGetWindowObject(hwndListView)))
    {
       RETURN(FALSE);
    }
@@ -3622,7 +3622,7 @@ co_IntSetWindowLong(HWND hWnd, DWORD Index, LONG NewValue, BOOL Ansi, BOOL bAlte
                 co_IntSendMessage(hWnd, WM_STYLECHANGING, GWL_STYLE, (LPARAM) &Style);
 
             /* WS_CLIPSIBLINGS can't be reset on top-level windows */
-            if (Window->spwndParent == UserGetDesktopWindow()) Style.styleNew |= WS_CLIPSIBLINGS;
+            if (UserIsDesktopWindow(Window->spwndParent)) Style.styleNew |= WS_CLIPSIBLINGS;
             /* WS_MINIMIZE can't be reset */
             if (OldValue & WS_MINIMIZE) Style.styleNew |= WS_MINIMIZE;
             /* Fixes wine FIXME: changing WS_DLGFRAME | WS_THICKFRAME is supposed to change WS_EX_WINDOWEDGE too */

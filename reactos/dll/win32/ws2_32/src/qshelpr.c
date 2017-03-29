@@ -17,7 +17,7 @@
 
 LPSTR
 WSAAPI
-AnsiDupFromUnicode(IN LPWSTR UnicodeString)
+AnsiDupFromUnicode(IN LPCWSTR UnicodeString)
 {
     INT Length = 0;
     BOOL GoOn = TRUE;
@@ -65,7 +65,7 @@ AnsiDupFromUnicode(IN LPWSTR UnicodeString)
 
 LPWSTR
 WSAAPI
-UnicodeDupFromAnsi(IN LPSTR AnsiString)
+UnicodeDupFromAnsi(IN LPCSTR AnsiString)
 {
     INT Length = 0;
     BOOL GoOn = TRUE;
@@ -204,14 +204,14 @@ ComputeQuerySetSize(IN LPWSAQUERYSETA AnsiSet,
             if (AnsiSet->lpcsaBuffer[i].LocalAddr.lpSockaddr)
             {
                 /* Align the current size and add the sockaddr's length */
-                Size = (Size + 3) & ~3; 
+                Size = (Size + 3) & ~3;
                 Size += AnsiSet->lpcsaBuffer[i].LocalAddr.iSockaddrLength;
             }
             /* Check for remote sockaddr */
             if (AnsiSet->lpcsaBuffer[i].RemoteAddr.lpSockaddr)
             {
                 /* Align the current size and add the sockaddr's length */
-                Size = (Size + 3) & ~3; 
+                Size = (Size + 3) & ~3;
                 Size += AnsiSet->lpcsaBuffer[i].RemoteAddr.iSockaddrLength;
             }
 
@@ -499,8 +499,8 @@ CopyQuerySetIndirectA(IN PWS_BUFFER Buffer,
                                                     sizeof(PVOID));
 
         /* Copy it into the buffer */
-        RtlCopyMemory(RelativeSet->lpafpProtocols,
-                      AnsiSet->lpafpProtocols,
+        RtlCopyMemory(RelativeSet->lpcsaBuffer,
+                      AnsiSet->lpcsaBuffer,
                       AnsiSet->dwNumberOfCsAddrs * sizeof(CSADDR_INFO));
 
         /* Copy the addresses inside the CSADDR */
@@ -693,8 +693,8 @@ CopyQuerySetIndirectW(IN PWS_BUFFER Buffer,
                                                     sizeof(PVOID));
 
         /* Copy it into the buffer */
-        RtlCopyMemory(RelativeSet->lpafpProtocols,
-                      UnicodeSet->lpafpProtocols,
+        RtlCopyMemory(RelativeSet->lpcsaBuffer,
+                      UnicodeSet->lpcsaBuffer,
                       UnicodeSet->dwNumberOfCsAddrs * sizeof(CSADDR_INFO));
 
         /* Copy the addresses inside the CSADDR */
@@ -823,13 +823,13 @@ MapAnsiQuerySetToUnicode(IN LPWSAQUERYSETA AnsiSet,
     {
         /* Fail, couldn't allocate memory */
         ErrorCode = WSA_NOT_ENOUGH_MEMORY;
-        goto error;
+        goto Exit;
     }
-    
+
     /* Build the relative buffer version */
     ErrorCode = WSABuildQuerySetBufferA(AnsiSet, AnsiSize, AnsiCopy);
-    if (ErrorCode != ERROR_SUCCESS) goto error;
-        
+    if (ErrorCode != ERROR_SUCCESS) goto Exit;
+
     /* Re-use the ANSI version since the fields match */
     UnicodeCopy = (LPWSAQUERYSETW)AnsiCopy;
 
@@ -842,7 +842,7 @@ MapAnsiQuerySetToUnicode(IN LPWSAQUERYSETA AnsiSet,
         {
             /* Fail */
             ErrorCode = WSA_NOT_ENOUGH_MEMORY;
-            goto error;
+            goto Exit;
         }
 
         /* Set the new string pointer */
@@ -858,7 +858,7 @@ MapAnsiQuerySetToUnicode(IN LPWSAQUERYSETA AnsiSet,
         {
             /* Fail */
             ErrorCode = WSA_NOT_ENOUGH_MEMORY;
-            goto error;
+            goto Exit;
         }
 
         /* Set the new string pointer */
@@ -874,7 +874,7 @@ MapAnsiQuerySetToUnicode(IN LPWSAQUERYSETA AnsiSet,
         {
             /* Fail */
             ErrorCode = WSA_NOT_ENOUGH_MEMORY;
-            goto error;
+            goto Exit;
         }
 
         /* Set the new string pointer */
@@ -890,7 +890,7 @@ MapAnsiQuerySetToUnicode(IN LPWSAQUERYSETA AnsiSet,
         {
             /* Fail */
             ErrorCode = WSA_NOT_ENOUGH_MEMORY;
-            goto error;
+            goto Exit;
         }
 
         /* Set the new string pointer */
@@ -904,13 +904,13 @@ MapAnsiQuerySetToUnicode(IN LPWSAQUERYSETA AnsiSet,
         /* The buffer wasn't large enough; return how much we need */
         *SetSize = UnicodeSize;
         ErrorCode = WSAEFAULT;
-        goto error;
+        goto Exit;
     }
 
     /* Build the relative unicode buffer */
     ErrorCode = WSABuildQuerySetBufferW(UnicodeCopy, *SetSize, UnicodeSet);
 
-error:
+Exit:
     /* Free the Ansi copy if we had one */
     if (AnsiCopy) HeapFree(WsSockHeap, 0, AnsiCopy);
 
@@ -926,9 +926,9 @@ error:
 
 INT
 WSAAPI
-MapUnicodeQuerySetToAnsi(OUT LPWSAQUERYSETW UnicodeSet,
+MapUnicodeQuerySetToAnsi(IN LPWSAQUERYSETW UnicodeSet,
                          IN OUT PSIZE_T SetSize,
-                         IN LPWSAQUERYSETA AnsiSet)
+                         OUT LPWSAQUERYSETA AnsiSet)
 {
     INT ErrorCode = ERROR_SUCCESS;
     SIZE_T UnicodeSize, AnsiSize;
@@ -944,13 +944,13 @@ MapUnicodeQuerySetToAnsi(OUT LPWSAQUERYSETW UnicodeSet,
     {
         /* Fail, couldn't allocate memory */
         ErrorCode = WSA_NOT_ENOUGH_MEMORY;
-        goto error;
+        goto Exit;
     }
-    
+
     /* Build the relative buffer version */
     ErrorCode = WSABuildQuerySetBufferW(UnicodeSet, UnicodeSize, UnicodeCopy);
-    if (ErrorCode != ERROR_SUCCESS) goto error;
-        
+    if (ErrorCode != ERROR_SUCCESS) goto Exit;
+
     /* Re-use the Unicode version since the fields match */
     AnsiCopy = (LPWSAQUERYSETA)UnicodeCopy;
 
@@ -963,7 +963,7 @@ MapUnicodeQuerySetToAnsi(OUT LPWSAQUERYSETW UnicodeSet,
         {
             /* Fail */
             ErrorCode = WSA_NOT_ENOUGH_MEMORY;
-            goto error;
+            goto Exit;
         }
 
         /* Set the new string pointer */
@@ -979,7 +979,7 @@ MapUnicodeQuerySetToAnsi(OUT LPWSAQUERYSETW UnicodeSet,
         {
             /* Fail */
             ErrorCode = WSA_NOT_ENOUGH_MEMORY;
-            goto error;
+            goto Exit;
         }
 
         /* Set the new string pointer */
@@ -995,7 +995,7 @@ MapUnicodeQuerySetToAnsi(OUT LPWSAQUERYSETW UnicodeSet,
         {
             /* Fail */
             ErrorCode = WSA_NOT_ENOUGH_MEMORY;
-            goto error;
+            goto Exit;
         }
 
         /* Set the new string pointer */
@@ -1011,7 +1011,7 @@ MapUnicodeQuerySetToAnsi(OUT LPWSAQUERYSETW UnicodeSet,
         {
             /* Fail */
             ErrorCode = WSA_NOT_ENOUGH_MEMORY;
-            goto error;
+            goto Exit;
         }
 
         /* Set the new string pointer */
@@ -1025,13 +1025,13 @@ MapUnicodeQuerySetToAnsi(OUT LPWSAQUERYSETW UnicodeSet,
         /* The buffer wasn't large enough; return how much we need */
         *SetSize = AnsiSize;
         ErrorCode = WSAEFAULT;
-        goto error;
+        goto Exit;
     }
 
     /* Build the relative unicode buffer */
     ErrorCode = WSABuildQuerySetBufferA(AnsiCopy, *SetSize, AnsiSet);
 
-error:
+Exit:
     /* Free the Ansi copy if we had one */
     if (UnicodeCopy) HeapFree(WsSockHeap, 0, UnicodeCopy);
 

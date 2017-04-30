@@ -61,6 +61,10 @@ public:
     friend BOOLEAN NTAPI InterruptServiceRoutine(IN PKINTERRUPT  Interrupt, IN PVOID  ServiceContext);
     friend VOID NTAPI XhciDeferredRoutine(IN PKDPC Dpc, IN PVOID DeferredContext, IN PVOID SystemArgument1, IN PVOID SystemArgument2);
     friend  VOID NTAPI StatusChangeWorkItemRoutine(PVOID Context);
+    friend BOOLEAN NTAPI IsDeviceSlotInitialized( IN ULONG PortId, IN PVOID Context);
+    friend NTSTATUS NTAPI InitializeDeviceSlot(IN ULONG PortId, IN PVOID Context);
+    friend NTSTATUS NTAPI DisableDeviceSlot(IN ULONG PortId, IN PVOID Context);
+    friend NTSTATUS NTAPI SearchDeviceInformation(IN ULONG SearchValue, IN ULONG SearchType, OUT PDEVICE_INFORMATION *OutDeviceInformation, IN PVOID Context);
 
     // start/stop/reset controller
     NTSTATUS StartController(void);
@@ -111,6 +115,7 @@ protected:
     PVOID VirtualBase;                                                                 // virtual base for memory manager
     PHYSICAL_ADDRESS PhysicalAddress;                                                  // physical base for memory manager
     BOOLEAN m_PortResetInProgress[0xF];                                                // stores reset in progress
+    LIST_ENTRY m_HeadDeviceList;                                                       // head of the device list
 };
 
 //
@@ -186,6 +191,11 @@ CUSBHardwareDevice::Initialize(
     // intialize status change work item
     //
     ExInitializeWorkItem(&m_StatusChangeWorkItem, StatusChangeWorkItemRoutine, PVOID(this));
+
+    //
+    // initialize device context list
+    //
+    InitializeListHead(&m_HeadDeviceList);
 
     m_VendorID = 0;
     m_DeviceID = 0;
@@ -1193,17 +1203,74 @@ NTSTATUS
 STDMETHODCALLTYPE
 CUSBHardwareDevice::GetDeviceInformationByAddress(
     IN ULONG DeviceAddress,
-    OUT PDEVICE_INFORMATION *DeviceInformation)
+    OUT PDEVICE_INFORMATION *OutDeviceInformation)
 {
-    UNREFERENCED_PARAMETER(DeviceAddress);
-    UNREFERENCED_PARAMETER(DeviceInformation);
-
-    *DeviceInformation = NULL;
+    PDEVICE_INFORMATION DeviceInformation = NULL;
+    NTSTATUS Status;
 
     //
-    // TODO: implement searching for device slot by address
+    // search device by address
+    //
+    Status = SearchDeviceInformation(DeviceAddress, XHCI_SEARCH_DEVICE_BY_ADDRESS, &DeviceInformation, this);
+    if (!NT_SUCCESS(Status))
+    {
+        //
+        // not found
+        //
+        return Status;
+    }
+
+    //
+    // set out pointer
+    //
+    *OutDeviceInformation = DeviceInformation;
+
+    //
+    // found
     //
     return STATUS_SUCCESS;
+}
+
+NTSTATUS
+STDMETHODCALLTYPE
+CUSBHardwareDevice::GetDeviceInformationBySlotId(
+    IN ULONG SlotId,
+    OUT PDEVICE_INFORMATION *OutDeviceInformation)
+{
+    PDEVICE_INFORMATION DeviceInformation = NULL;
+    NTSTATUS Status;
+
+    //
+    // search device by ID
+    //
+    Status = SearchDeviceInformation(SlotId, XHCI_SEARCH_DEVICE_BY_SLOT_ID, &DeviceInformation, this);
+    if (!NT_SUCCESS(Status))
+    {
+        //
+        // not found
+        //
+        return Status;
+    }
+
+    //
+    // set out pointer
+    //
+    *OutDeviceInformation = DeviceInformation;
+
+    //
+    // found
+    //
+    return STATUS_SUCCESS;
+}
+
+VOID
+STDMETHODCALLTYPE
+CUSBHardwareDevice::RingDoorbellRegister(
+    IN ULONG SlotId,
+    IN ULONG Endpoint,
+    IN ULONG StreamId)
+{
+    WRITE_DOORBELL_REG_ULONG(XHCI_DOORBELL(SlotId), XHCI_DOORBELL_TARGET(Endpoint) | XHCI_DOORBELL_STREAMID(StreamId));
 }
 
 BOOLEAN
@@ -1277,6 +1344,9 @@ XhciDeferredRoutine(
     ULONG QueueSCEWorkItem = FALSE;
     PTRB TransferRequestBlock = NULL;
     CUSBHardwareDevice *This;
+    ULONG PortId;
+    NTSTATUS Status;
+    USHORT PortChange, PortStatus;
 
     This = (CUSBHardwareDevice*)SystemArgument1;
 
@@ -1326,6 +1396,60 @@ XhciDeferredRoutine(
     }
 
     //
+    // port status change?
+    //
+    for (PortId = 1; QueueSCEWorkItem && (PortId < This->m_Capabilities.HcsParams1.MaxPorts); PortId++)
+    {
+        //
+        // get port status
+        //
+        Status = This->GetPortStatus(PortId, &PortStatus, &PortChange);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT("Failed to get status on port %x\n", PortId);
+            continue;
+        }
+        if (PortStatus & (USB_PORT_STATUS_CONNECT | USB_PORT_STATUS_ENABLE))
+        {
+            //
+            // check if slot is initialized
+            //
+            if (IsDeviceSlotInitialized(PortId, This))
+            {
+                continue;
+            }
+
+            //
+            // enable slot associated with the port
+            //
+            Status = InitializeDeviceSlot(PortId, This);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT("Failed to initialize device slot on port %x\n", PortId);
+            }
+        }
+        else if (!(PortStatus & USB_PORT_STATUS_CONNECT))
+        {
+            //
+            // check if slot is initialized
+            //
+            if (!IsDeviceSlotInitialized(PortId, This))
+            {
+                continue;
+            }
+
+            //
+            // disable slot associated with the port(4.6.4 Disable Slot)
+            //
+            Status = DisableDeviceSlot(PortId, This);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT("Failed to disable device slot on port %x\n", PortId);
+            }
+        }
+    }
+
+    //
     // queue work item
     //
     if (QueueSCEWorkItem && This->m_SCECallBack != NULL)
@@ -1337,13 +1461,374 @@ XhciDeferredRoutine(
     }
 }
 
-VOID
-CUSBHardwareDevice::RingDoorbellRegister(
-    IN ULONG SlotId,
-    IN ULONG Endpoint,
-    IN ULONG StreamId)
+BOOLEAN
+NTAPI
+IsDeviceSlotInitialized(
+    IN ULONG PortId,
+    IN PVOID Context)
 {
-    WRITE_DOORBELL_REG_ULONG(XHCI_DOORBELL(SlotId), XHCI_DOORBELL_TARGET(Endpoint) | XHCI_DOORBELL_STREAMID(StreamId));
+    PDEVICE_INFORMATION DeviceInformation = NULL;
+    NTSTATUS Status;
+    
+    //
+    // search device by port id
+    //
+    Status = SearchDeviceInformation(PortId, XHCI_SEARCH_DEVICE_BY_PORT_ID, &DeviceInformation, Context);
+    if (!NT_SUCCESS(Status))
+    {
+        //
+        // not found
+        //
+        return FALSE;
+    }
+    else
+    {
+        //
+        // found
+        //
+        return TRUE;
+    }
+}
+
+NTSTATUS
+NTAPI
+InitializeDeviceSlot(IN ULONG PortId, IN PVOID Context)
+{
+    PLIST_ENTRY Entry;
+    PDEVICE_INFORMATION DeviceInformation = NULL;
+    KIRQL               OldIrql;
+    TRB                 CompletedTrb;
+    COMMAND_INFORMATION CommandInformation;
+    NTSTATUS            Status;
+    ULONG               SlotId, PortStatus;
+    CUSBHardwareDevice  *This = (CUSBHardwareDevice*)Context;
+
+    //
+    // enable slot command
+    //
+    CommandInformation.CommandType = XHCI_TRB_TYPE_ENABLE_SLOT;
+
+    //
+    // send command
+    //
+    Status = This->m_UsbQueue->SubmitInternalCommand(This->m_MemoryManager, &CommandInformation, &CompletedTrb);
+    if (!NT_SUCCESS(Status))
+    {
+        //
+        // no more slots?
+        //
+        DPRINT1("Failed to enable slot with status %x\n", Status);
+        return Status;
+    }
+
+    //
+    // save slot id for later use
+    //
+    SlotId = XHCI_TRB_GET_SLOT(CompletedTrb.Field[3]);
+
+    //
+    // allocate memory for new device
+    //
+    DeviceInformation = (PDEVICE_INFORMATION)ExAllocatePoolWithTag(NonPagedPool, sizeof(DEVICE_INFORMATION), TAG_USBXHCI);
+    if (!DeviceInformation)
+    {
+        //
+        // allocation failed
+        //
+        DPRINT1("Memory allocation failed\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    //
+    // clear it
+    //
+    RtlZeroMemory(DeviceInformation, sizeof(DEVICE_INFORMATION));
+
+    //
+    // allocate memory for device input context
+    //
+    Status = This->m_MemoryManager->Allocate(sizeof(INPUT_DEVICE_CONTEXT),
+                                             (PVOID*)&DeviceInformation->InputContextAddress, 
+                                             &DeviceInformation->PhysicalInputContextAddress);
+    if (!NT_SUCCESS(Status))
+    {
+        //
+        // allocation failed
+        //
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+
+    //
+    // nothing to drop
+    //
+    DeviceInformation->InputContextAddress->InputControl.DropFlags = 0;
+
+    //
+    // configure slot context and endpoint 0
+    //
+    DeviceInformation->InputContextAddress->InputControl.AddFlags = 3;
+
+    //
+    // get port status
+    //
+    PortStatus = This->READ_OPERATIONAL_REG_ULONG(XHCI_PORTSC(PortId));
+
+    //
+    // set device speed
+    //
+    DeviceInformation->InputContextAddress->SlotContext.DeviceInfo |= XHCI_SLOT_SPEED(XHCI_PORT_GET_SPEED(PortStatus));
+
+    //
+    // TODO: Set route string and number of entries(oly one for default endpoint)
+    //
+    DeviceInformation->InputContextAddress->SlotContext.DeviceInfo |= XHCI_SLOT_NUM_ENTRIES(1) | XHCI_SLOT_ROUTE(PortId);
+
+    //
+    // FIXME: set root hub port(default port ID == 1)
+    //
+    DeviceInformation->InputContextAddress->SlotContext.DeviceInfo2 = XHCI_SLOT_RH_PORT(1);
+
+    //
+    // set interrupter traget
+    //
+    DeviceInformation->InputContextAddress->SlotContext.TTInfo = XHCI_SLOT_IRQ_TARGET(0);
+
+    //
+    // set initial address and slot state
+    //
+    DeviceInformation->InputContextAddress->SlotContext.DeviceState = XHCI_SLOT_SLOT_STATE(0) | XHCI_SLOT_DEVICE_ADDRESS(0);
+
+    //
+    // allocate memory for device context
+    //
+    Status = This->m_MemoryManager->Allocate(sizeof(DEVICE_CONTEXT), 
+                                             (PVOID*)&DeviceInformation->DeviceContextAddress,
+                                             &DeviceInformation->PhysicalDeviceContextAddress);
+    if (!NT_SUCCESS(Status))
+    {
+        //
+        // allocation failed
+        //
+        DPRINT("Failed to allocate memory for device context\n");
+        goto Cleanup;
+    }
+
+    //
+    // setup the entry in DCBAA
+    //
+    This->m_DeviceContextArray[SlotId] = DeviceInformation->PhysicalDeviceContextAddress;
+
+    //
+    // allocate memory for default endpoint TRBs
+    //
+    Status = This->m_MemoryManager->Allocate(sizeof(TRB) * XHCI_MAX_TRANSFERS, 
+                                             (PVOID*)&DeviceInformation->Endpoints[0].VirtualRingbufferAddress,
+                                             &DeviceInformation->Endpoints[0].PhysicalRingbufferAddress);
+    if (!NT_SUCCESS(Status))
+    {
+        //
+        // allocation failed
+        //
+        DPRINT("Failed to allocate memory for default endpoint ringbuffer\n");
+        goto Cleanup;
+    }
+
+    //
+    // set up the enqueue and dequeue pointer
+    //
+    DeviceInformation->Endpoints[0].DequeuePointer = DeviceInformation->Endpoints[0].EnqueuePointer = (PTRB)DeviceInformation->Endpoints[0].VirtualRingbufferAddress;
+
+    //
+    // initialize linked list of the descriptors
+    //
+    InitializeListHead(&DeviceInformation->Endpoints[0].DescriptorListHead);
+
+    //
+    // TODO: 1. get device speed
+    //       2. configure endpoint
+    //
+
+    //
+    // put device in 'default' state
+    //
+    CommandInformation.CommandType     = XHCI_TRB_TYPE_ADDRESS_DEVICE;
+    CommandInformation.InputContext    = DeviceInformation->PhysicalInputContextAddress;
+    CommandInformation.BlockSetRequest = TRUE;
+    CommandInformation.SlotId          = SlotId;
+
+    //
+    // send command
+    //
+    Status = This->m_UsbQueue->SubmitInternalCommand(This->m_MemoryManager, &CommandInformation, &CompletedTrb);
+    if (!NT_SUCCESS(Status))
+    {
+        //
+        // command failed
+        //
+        DPRINT("Failed to address device with status %x\n", Status);
+        goto Cleanup;
+    }
+
+    //
+    // set information about the device context
+    //
+    DeviceInformation->State                      = XHCI_DEVICE_SLOT_STATE_DEFAULT;
+    DeviceInformation->SlotId                     = SlotId;
+    DeviceInformation->PortId                     = PortId;
+    DeviceInformation->Endpoints[0].EndpointState = XHCI_ENDPOINT_STATE_RUNNING;
+    DeviceInformation->Address                    = DeviceInformation->DeviceContextAddress->SlotContext.DeviceState & 0xFF;
+
+    //
+    // acquire lock
+    //
+    KeAcquireSpinLock(&This->m_Lock, &OldIrql);
+
+    //
+    // insert it in the list
+    //
+    InsertTailList(&This->m_HeadDeviceList, &DeviceInformation->DeviceListEntry);
+
+    //
+    // release lock
+    //
+    KeReleaseSpinLock(&This->m_Lock, OldIrql);
+
+    //
+    // great success
+    //
+    return STATUS_SUCCESS;
+
+Cleanup:
+
+    //
+    // free slot
+    //
+    CommandInformation.CommandType = XHCI_TRB_TYPE_DISABLE_SLOT;
+
+    //
+    // send command
+    //
+    This->m_UsbQueue->SubmitInternalCommand(This->m_MemoryManager, &CommandInformation, &CompletedTrb);
+
+    //
+    // free input context
+    //
+    if (DeviceInformation->InputContextAddress)
+    {
+        This->m_MemoryManager->Release(DeviceInformation->InputContextAddress, sizeof(INPUT_DEVICE_CONTEXT));
+    }
+
+    //
+    // free device context
+    //
+    if (DeviceInformation->DeviceContextAddress)
+    {
+        This->m_MemoryManager->Release(DeviceInformation->DeviceContextAddress, sizeof(DEVICE_CONTEXT));
+    }
+
+    //
+    // free ringbuffers
+    //
+    if (DeviceInformation->Endpoints[0].VirtualRingbufferAddress)
+    {
+        This->m_MemoryManager->Release(DeviceInformation->Endpoints[0].VirtualRingbufferAddress, sizeof(TRB) * XHCI_MAX_TRANSFERS);
+    }
+
+    //
+    // free device information
+    //
+    ExFreePoolWithTag(DeviceInformation, TAG_USBXHCI);
+
+    //
+    // failed
+    //
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+SearchDeviceInformation(
+    IN ULONG SearchValue,
+    IN ULONG SearchType,
+    OUT PDEVICE_INFORMATION *OutDeviceInformation,
+    IN PVOID Context)
+{
+    PLIST_ENTRY Entry;
+    PDEVICE_INFORMATION DeviceInformation = NULL;
+    KIRQL OldIrql;
+    CUSBHardwareDevice *This = (CUSBHardwareDevice*)Context;
+
+    //
+    // acquire lock
+    //
+    KeAcquireSpinLock(&This->m_Lock, &OldIrql);
+
+    //
+    // search for device address
+    //
+    Entry = This->m_HeadDeviceList.Flink;
+    while (Entry != &This->m_HeadDeviceList)
+    {
+        //
+        // get the device information
+        //
+        DeviceInformation = CONTAINING_RECORD(Entry, DEVICE_INFORMATION, DeviceListEntry);
+
+        //
+        // is this the device we are looking for
+        //
+        if (((SearchType == XHCI_SEARCH_DEVICE_BY_SLOT_ID) && (DeviceInformation->SlotId == SearchValue)) ||
+            ((SearchType == XHCI_SEARCH_DEVICE_BY_PORT_ID) && (DeviceInformation->PortId == SearchValue)) ||
+            ((SearchType == XHCI_SEARCH_DEVICE_BY_ADDRESS) && (DeviceInformation->Address == SearchValue)) )
+        {
+            ASSERT(DeviceInformation->State >= XHCI_DEVICE_SLOT_STATE_DEFAULT);
+
+            //
+            // set out device info
+            //
+            *OutDeviceInformation = DeviceInformation;
+
+            //
+            // release lock
+            //
+            KeReleaseSpinLock(&This->m_Lock, OldIrql);
+
+            //
+            // done
+            //
+            return STATUS_SUCCESS;
+        }
+
+        //
+        // next entry
+        //
+        Entry = Entry->Flink;
+    }
+
+    //
+    // release lock
+    //
+    KeReleaseSpinLock(&This->m_Lock, OldIrql);
+
+    return STATUS_NO_SUCH_DEVICE;
+}
+
+NTSTATUS
+NTAPI
+DisableDeviceSlot(IN ULONG PortId, IN PVOID Context)
+{
+    //PLIST_ENTRY Entry;
+    //PDEVICE_INFORMATION DeviceInformation = NULL;
+    //KIRQL OldIrql;
+    //CUSBHardwareDevice *This = (CUSBHardwareDevice*)Context;
+
+    UNREFERENCED_PARAMETER(PortId);
+    UNREFERENCED_PARAMETER(Context);
+    
+    UNIMPLEMENTED_DBGBREAK();
+
+    return STATUS_NOT_IMPLEMENTED;
 }
 
 VOID

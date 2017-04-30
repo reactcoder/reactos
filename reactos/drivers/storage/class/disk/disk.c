@@ -3921,6 +3921,16 @@ Return Value:
                 ZwClose(targetKey);
 
                 if (!NT_SUCCESS(status)) {
+                    ExFreePool(keyData);
+                    continue;
+                }
+
+                //
+                // Data too short
+                //
+
+                if (keyData->DataLength < 9 * sizeof(WCHAR)) {
+                    ExFreePool(keyData);
                     continue;
                 }
 
@@ -3930,7 +3940,7 @@ Return Value:
 
                 identifier.Buffer =
                     (PWSTR)((PUCHAR)keyData + keyData->DataOffset);
-                identifier.Length = (USHORT)keyData->DataLength;
+                identifier.Length = (USHORT)keyData->DataLength - sizeof(WCHAR);
                 identifier.MaximumLength = (USHORT)keyData->DataLength;
 
                 //
@@ -3943,6 +3953,7 @@ Return Value:
                                                  TRUE);
 
                 if (!NT_SUCCESS(status)) {
+                    ExFreePool(keyData);
                     continue;
                 }
 

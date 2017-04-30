@@ -47,6 +47,16 @@ IsWindowActive(HWND hWnd, DWORD ExStyle)
     return ret;
 }
 
+BOOL
+IsScrollBarVisible(HWND hWnd, INT hBar)
+{
+  SCROLLBARINFO sbi = {sizeof(SCROLLBARINFO)};
+  if(!GetScrollBarInfo(hWnd, hBar, &sbi))
+    return FALSE;
+
+  return !(sbi.rgstate[0] & STATE_SYSTEM_OFFSCREEN);
+}
+
 static BOOL 
 UserHasWindowEdge(DWORD Style, DWORD ExStyle)
 {
@@ -97,12 +107,6 @@ WCHAR *UserGetWindowCaption(HWND hwnd)
     text = (WCHAR*)HeapAlloc(GetProcessHeap(), 0, len  * sizeof(WCHAR));
     if (text) InternalGetWindowText(hwnd, text, len);
     return text;
-}
-
-static void 
-ThemeDrawTitle(PDRAW_CONTEXT context, RECT* prcCurrent)
-{
-
 }
 
 HRESULT WINAPI ThemeDrawCaptionText(HTHEME hTheme, HDC hdc, int iPartId, int iStateId,
@@ -245,7 +249,7 @@ ThemeDrawCaptionButton(PDRAW_CONTEXT pcontext,
                 iStateId = BUTTON_DISABLED;
         }
  
-        iPartId = WP_MINBUTTON;
+        iPartId = pcontext->wi.dwStyle & WS_MINIMIZE ? WP_RESTOREBUTTON : WP_MINBUTTON;
         break;
 
     default:
@@ -329,7 +333,9 @@ ThemeDrawCaption(PDRAW_CONTEXT pcontext, RECT* prcCurrent)
     CaptionText = UserGetWindowCaption(pcontext->hWnd);
 
     /* Get the caption part and state id */
-    if (pcontext->wi.dwExStyle & WS_EX_TOOLWINDOW)
+    if (pcontext->wi.dwStyle & WS_MINIMIZE)
+        iPart = WP_MINCAPTION;
+    else if (pcontext->wi.dwExStyle & WS_EX_TOOLWINDOW)
         iPart = WP_SMALLCAPTION;
     else if (pcontext->wi.dwStyle & WS_MAXIMIZE)
         iPart = WP_MAXCAPTION;
@@ -478,150 +484,50 @@ DrawClassicFrame(PDRAW_CONTEXT context, RECT* prcCurrent)
 
         InflateRect(prcCurrent, -Width, -Height);
     }
-
-    if (context->wi.dwExStyle & WS_EX_CLIENTEDGE)
-    {
-        DrawEdge(context->hDC, prcCurrent, EDGE_SUNKEN, BF_RECT | BF_ADJUST);
-    }
 }
 
-static void
-ThemeDrawMenuItem(PDRAW_CONTEXT pcontext, HMENU Menu, int imenu)
+static void ThemeDrawMenuBar(PDRAW_CONTEXT pcontext, RECT* prcCurrent)
 {
-    PWCHAR Text;
-    BOOL flat_menu = FALSE;
-    MENUITEMINFOW Item;
-    RECT Rect,rcCalc;
-    WCHAR wstrItemText[20];
-    register int i = 0;
-    HFONT FontOld = NULL;
-    UINT uFormat = DT_CENTER | DT_VCENTER | DT_SINGLELINE;
-
-    Item.cbSize = sizeof(MENUITEMINFOW);
-    Item.fMask = MIIM_FTYPE | MIIM_STATE | MIIM_STRING;
-    Item.dwTypeData = wstrItemText;
-    Item.cch = 20;
-    if (!GetMenuItemInfoW(Menu, imenu, TRUE, &Item))
-        return;
-
-    if(Item.fType & MF_SEPARATOR)
-        return;
-
-    if(Item.cch >= 20)
-    {
-        Item.cch++;
-        Item.dwTypeData = (LPWSTR)HeapAlloc(GetProcessHeap(), 0, Item.cch  * sizeof(WCHAR));
-        Item.fMask = MIIM_FTYPE | MIIM_STATE | MIIM_STRING;
-        GetMenuItemInfoW(Menu, imenu, TRUE, &Item);
-    }
-
-    if(Item.cch == 0)
-        return;
-
-    flat_menu = GetThemeSysBool(pcontext->theme, TMT_FLATMENUS);
-
-    GetMenuItemRect(pcontext->hWnd, Menu, imenu, &Rect);
-
-    OffsetRect(&Rect, -pcontext->wi.rcWindow.left, -pcontext->wi.rcWindow.top);
-    
-    SetBkColor(pcontext->hDC, GetSysColor(flat_menu ? COLOR_MENUBAR : COLOR_MENU));
-    SetTextColor(pcontext->hDC, GetSysColor(Item.fState & MF_GRAYED ? COLOR_GRAYTEXT : COLOR_MENUTEXT));
-
-    if (0 != (Item.fState & MFS_DEFAULT))
-    {
-        FontOld = (HFONT)SelectObject(pcontext->hDC, hMenuFontBold);
-    }
-
-    Rect.left += MENU_BAR_ITEMS_SPACE / 2;
-    Rect.right -= MENU_BAR_ITEMS_SPACE / 2;
-
-    Text = (PWCHAR) Item.dwTypeData;
-    if(Text)
-    {
-        for (i = 0; L'\0' != Text[i]; i++)
-        {
-            if (L'\t' == Text[i] || L'\b' == Text[i])
-            {
-                break;
-            }
-        }
-    }
-
-    SetBkMode(pcontext->hDC, OPAQUE);
-
-    if (0 != (Item.fState & MF_GRAYED))
-    {
-        if (0 == (Item.fState & MF_HILITE))
-        {
-            ++Rect.left; ++Rect.top; ++Rect.right; ++Rect.bottom;
-            SetTextColor(pcontext->hDC, RGB(0xff, 0xff, 0xff));
-            DrawTextW(pcontext->hDC, Text, i, &Rect, uFormat);
-            --Rect.left; --Rect.top; --Rect.right; --Rect.bottom;
-        }
-        SetTextColor(pcontext->hDC, RGB(0x80, 0x80, 0x80));
-        SetBkMode(pcontext->hDC, TRANSPARENT);
-    }
-    
-    DrawTextW(pcontext->hDC, Text, i, &Rect, uFormat);
-
-    /* Exclude from the clip region the area drawn by DrawText */
-    SetRect(&rcCalc, 0,0,0,0);
-    DrawTextW(pcontext->hDC, Text, i, &rcCalc, uFormat | DT_CALCRECT);
-    InflateRect( &Rect, 0, -(rcCalc.bottom+1)/2);
-    ExcludeClipRect(pcontext->hDC, Rect.left, Rect.top, Rect.right, Rect.bottom);
-
-    if (NULL != FontOld)
-    {
-        SelectObject(pcontext->hDC, FontOld);
-    }
+    /* Let the window manager paint the menu */
+    prcCurrent->top += PaintMenuBar(pcontext->hWnd, 
+                                    pcontext->hDC, 
+                                    pcontext->wi.cxWindowBorders, 
+                                    pcontext->wi.cxWindowBorders,
+                                    prcCurrent->top, 
+                                    pcontext->Active);
 }
 
-void WINAPI
-ThemeDrawMenuBar(PDRAW_CONTEXT pcontext, PRECT prcCurrent)
+static void ThemeDrawScrollBarsGrip(PDRAW_CONTEXT pcontext, RECT* prcCurrent)
 {
-    HMENU Menu;
-    MENUBARINFO MenuBarInfo;
-    int i;
-    HFONT FontOld = NULL;
-    BOOL flat_menu;
-    RECT Rect;
-    HPEN oldPen ;
+    RECT rcPart;
+    HWND hwndParent;
+    RECT ParentClientRect;
+    DWORD ParentStyle;
 
-    if (!hMenuFont)
-        InitMenuFont();
+    rcPart = *prcCurrent;
 
-    flat_menu = GetThemeSysBool(pcontext->theme, TMT_FLATMENUS);
+    if (pcontext->wi.dwExStyle & WS_EX_LEFTSCROLLBAR)
+       rcPart.right = rcPart.left + GetSystemMetrics(SM_CXVSCROLL);
+    else
+       rcPart.left = rcPart.right - GetSystemMetrics(SM_CXVSCROLL);
 
-    MenuBarInfo.cbSize = sizeof(MENUBARINFO);
-    if (! GetMenuBarInfo(pcontext->hWnd, OBJID_MENU, 0, &MenuBarInfo))
-        return;
+    rcPart.top = rcPart.bottom - GetSystemMetrics(SM_CYHSCROLL);
 
-    Menu = GetMenu(pcontext->hWnd);
-    if (GetMenuItemCount(Menu) == 0)
-        return;
+    FillRect(pcontext->hDC, &rcPart, GetSysColorBrush(COLOR_BTNFACE));
 
-    Rect = MenuBarInfo.rcBar;
-    OffsetRect(&Rect, -pcontext->wi.rcWindow.left, -pcontext->wi.rcWindow.top);
+    hwndParent = GetParent(pcontext->hWnd);
+    GetClientRect(hwndParent, &ParentClientRect);
+    ParentStyle = GetWindowLongW(hwndParent, GWL_STYLE);
 
-    /* Draw a line under the menu */
-    oldPen = (HPEN)SelectObject(pcontext->hDC, GetStockObject(DC_PEN));
-    SetDCPenColor(pcontext->hDC, GetSysColor(COLOR_3DFACE));
-    MoveToEx(pcontext->hDC, Rect.left, Rect.bottom, NULL);
-    LineTo(pcontext->hDC, Rect.right, Rect.bottom);
-    SelectObject(pcontext->hDC, oldPen);
-
-    /* Draw menu items */
-    FontOld = (HFONT)SelectObject(pcontext->hDC, hMenuFont);
-
-    for (i = 0; i < GetMenuItemCount(Menu); i++)
+    if (HASSIZEGRIP(pcontext->wi.dwStyle, pcontext->wi.dwExStyle, ParentStyle, pcontext->wi.rcWindow, ParentClientRect))
     {
-        ThemeDrawMenuItem(pcontext, Menu, i);
+        int iState;
+        if (pcontext->wi.dwExStyle & WS_EX_LEFTSCROLLBAR)
+            iState = pcontext->wi.dwExStyle & WS_EX_LEFTSCROLLBAR;
+        else
+            iState = SZB_RIGHTALIGN;
+        DrawThemeBackground(pcontext->scrolltheme, pcontext->hDC, SBP_SIZEBOX, iState, &rcPart, NULL);
     }
-
-    SelectObject(pcontext->hDC, FontOld);
-
-    /* Fill the menu background area that isn't painted yet */
-    FillRect(pcontext->hDC, &Rect, GetSysColorBrush(flat_menu ? COLOR_MENUBAR : COLOR_MENU));
 }
 
 static void 
@@ -629,12 +535,6 @@ ThemePaintWindow(PDRAW_CONTEXT pcontext, RECT* prcCurrent, BOOL bDoDoubleBufferi
 {
     if(!(pcontext->wi.dwStyle & WS_VISIBLE))
         return;
-
-    if(pcontext->wi.dwStyle & WS_MINIMIZE)
-    {
-        ThemeDrawTitle(pcontext, prcCurrent);
-        return;
-    }
 
     if((pcontext->wi.dwStyle & WS_CAPTION)==WS_CAPTION)
     {
@@ -650,14 +550,27 @@ ThemePaintWindow(PDRAW_CONTEXT pcontext, RECT* prcCurrent, BOOL bDoDoubleBufferi
         DrawClassicFrame(pcontext, prcCurrent);
     }
 
+    if(pcontext->wi.dwStyle & WS_MINIMIZE)
+        return;
+
     if(HAS_MENU(pcontext->hWnd, pcontext->wi.dwStyle))
         ThemeDrawMenuBar(pcontext, prcCurrent);
-    
-    if(pcontext->wi.dwStyle & WS_HSCROLL)
+
+    if (pcontext->wi.dwExStyle & WS_EX_CLIENTEDGE)
+        DrawEdge(pcontext->hDC, prcCurrent, EDGE_SUNKEN, BF_RECT | BF_ADJUST);
+
+    if((pcontext->wi.dwStyle & WS_HSCROLL) && IsScrollBarVisible(pcontext->hWnd, OBJID_HSCROLL))
         ThemeDrawScrollBar(pcontext, SB_HORZ , NULL);
 
-    if(pcontext->wi.dwStyle & WS_VSCROLL)
+    if((pcontext->wi.dwStyle & WS_VSCROLL) && IsScrollBarVisible(pcontext->hWnd, OBJID_VSCROLL))
         ThemeDrawScrollBar(pcontext, SB_VERT, NULL);
+
+    if((pcontext->wi.dwStyle & (WS_HSCROLL|WS_VSCROLL)) == (WS_HSCROLL|WS_VSCROLL) &&
+       IsScrollBarVisible(pcontext->hWnd, OBJID_HSCROLL) &&
+       IsScrollBarVisible(pcontext->hWnd, OBJID_VSCROLL))
+    {
+        ThemeDrawScrollBarsGrip(pcontext, prcCurrent);
+    }
 }
 
 /*
@@ -1192,7 +1105,7 @@ HRESULT WINAPI DrawNCPreview(HDC hDC,
     if (!context.theme)
         return E_FAIL;
     context.scrolltheme = OpenThemeDataFromFile(hThemeFile, hwndDummy, L"SCROLLBAR", 0);
-    if (!context.theme)
+    if (!context.scrolltheme)
         return E_FAIL;
     context.Active = TRUE;
     context.wi.cbSize = sizeof(context.wi);

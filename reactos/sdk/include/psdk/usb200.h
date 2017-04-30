@@ -52,7 +52,6 @@ typedef enum _USB_DEVICE_SPEED {
 #define USB_PORT_STATUS_POWER                         0x0100
 #define USB_PORT_STATUS_LOW_SPEED                     0x0200
 #define USB_PORT_STATUS_HIGH_SPEED                    0x0400
-#define USB_PORT_STATUS_SUPER_SPEED                   0x0800
 
 
 typedef union _BM_REQUEST_TYPE {

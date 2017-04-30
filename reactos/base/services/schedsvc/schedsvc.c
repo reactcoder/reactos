@@ -21,7 +21,7 @@
  * PROJECT:          ReactOS Services
  * FILE:             base/services/schedsvc/schedsvc.c
  * PURPOSE:          Scheduling service
- * PROGRAMMER:       Eric Kohl
+ * PROGRAMMER:       Eric Kohl <eric.kohl@reactos.org>
  */
 
 /* INCLUDES *****************************************************************/
@@ -61,6 +61,7 @@ UpdateServiceStatus(DWORD dwState)
                      &ServiceStatus);
 }
 
+
 static DWORD WINAPI
 ServiceControlHandler(DWORD dwControl,
                       DWORD dwEventType,
@@ -98,6 +99,7 @@ ServiceControlHandler(DWORD dwControl,
         case SERVICE_CONTROL_SHUTDOWN:
             TRACE("  SERVICE_CONTROL_SHUTDOWN received\n");
             UpdateServiceStatus(SERVICE_STOP_PENDING);
+            RpcMgmtStopServerListening(NULL);
             UpdateServiceStatus(SERVICE_STOPPED);
             return ERROR_SUCCESS;
 
@@ -113,21 +115,39 @@ DWORD
 ServiceInit(VOID)
 {
     HANDLE hThread;
+    DWORD dwError;
 
+    /* Initialize the job list */
+    InitializeListHead(&JobListHead);
+
+    /* Initialize the job list lock */
+    RtlInitializeResource(&JobListLock);
+
+    /* Initialize the start list */
+    InitializeListHead(&StartListHead);
+
+    /* Initialize the start list lock */
+    RtlInitializeResource(&StartListLock);
+
+    /* Load stored jobs from the registry */
+    dwError = LoadJobs();
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
+
+    /* Start the RPC thread */
     hThread = CreateThread(NULL,
                            0,
                            (LPTHREAD_START_ROUTINE)RpcThreadRoutine,
                            NULL,
                            0,
                            NULL);
-
     if (!hThread)
     {
         ERR("Can't create PortThread\n");
         return GetLastError();
     }
-    else
-        CloseHandle(hThread);
+
+    CloseHandle(hThread);
 
     return ERROR_SUCCESS;
 }

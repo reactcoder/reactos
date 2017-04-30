@@ -240,8 +240,14 @@ OnCreateTaskbarPage(HWND hwnd,
 
     pPropInfo->hTaskbarWnd = hwnd;
 
-    // FIXME: check buttons
-    CheckDlgButton(hwnd, IDC_TASKBARPROP_SECONDS, AdvancedSettings.bShowSeconds ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(hwnd, IDC_TASKBARPROP_LOCK, TaskBarSettings.bLock ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(hwnd, IDC_TASKBARPROP_HIDE, TaskBarSettings.bAutoHide ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(hwnd, IDC_TASKBARPROP_ONTOP, TaskBarSettings.bAlwaysOnTop ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(hwnd, IDC_TASKBARPROP_GROUP, TaskBarSettings.bGroupButtons ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(hwnd, IDC_TASKBARPROP_SHOWQL, TaskBarSettings.bShowQuickLaunch ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(hwnd, IDC_TASKBARPROP_CLOCK, TaskBarSettings.bShowClock ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(hwnd, IDC_TASKBARPROP_SECONDS, TaskBarSettings.bShowSeconds ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(hwnd, IDC_TASKBARPROP_HIDEICONS, TaskBarSettings.bHideInactiveIcons ? BST_CHECKED : BST_UNCHECKED);
 
     UpdateBitmaps(pPropInfo);
 }
@@ -313,8 +319,8 @@ TaskbarPageProc(HWND hwndDlg,
                     break;
 
                 case PSN_APPLY:
-                    AdvancedSettings.bShowSeconds = IsDlgButtonChecked(hwndDlg, IDC_TASKBARPROP_SECONDS);
-                    SaveSettingDword(szAdvancedSettingsKey, TEXT("ShowSeconds"), AdvancedSettings.bShowSeconds);
+                    TaskBarSettings.bShowSeconds = IsDlgButtonChecked(hwndDlg, IDC_TASKBARPROP_SECONDS);
+                    SaveTaskBarSettings();
                     break;
             }
 

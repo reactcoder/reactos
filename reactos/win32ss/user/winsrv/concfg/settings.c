@@ -19,6 +19,7 @@
 #include <winbase.h>
 #include <wingdi.h> // For LF_FACESIZE
 #include <wincon.h>
+#include <winnls.h>
 #include <winreg.h>
 // #include <winuser.h>
 // #include <imm.h>
@@ -121,7 +122,7 @@ ConCfgOpenUserSettings(LPCWSTR ConsoleTitle,
                        REGSAM samDesired,
                        BOOLEAN Create)
 {
-    BOOLEAN RetVal = TRUE;
+    BOOLEAN Success = TRUE;
     NTSTATUS Status;
     WCHAR szBuffer[MAX_PATH] = L"Console\\";
     WCHAR szBuffer2[MAX_PATH] = L"";
@@ -164,35 +165,35 @@ ConCfgOpenUserSettings(LPCWSTR ConsoleTitle,
     if (Create)
     {
         /* Create the key */
-        RetVal = (RegCreateKeyExW(hKey,
-                                  szBuffer,
-                                  0, NULL,
-                                  REG_OPTION_NON_VOLATILE,
-                                  samDesired,
-                                  NULL,
-                                  hSubKey,
-                                  NULL) == ERROR_SUCCESS);
+        Success = (RegCreateKeyExW(hKey,
+                                   szBuffer,
+                                   0, NULL,
+                                   REG_OPTION_NON_VOLATILE,
+                                   samDesired,
+                                   NULL,
+                                   hSubKey,
+                                   NULL) == ERROR_SUCCESS);
     }
     else
     {
         /* Open the key */
-        RetVal = (RegOpenKeyExW(hKey,
-                                szBuffer,
-                                0,
-                                samDesired,
-                                hSubKey) == ERROR_SUCCESS);
+        Success = (RegOpenKeyExW(hKey,
+                                 szBuffer,
+                                 0,
+                                 samDesired,
+                                 hSubKey) == ERROR_SUCCESS);
     }
 
     /* Close the parent key and return success or not */
     NtClose(hKey);
-    return RetVal;
+    return Success;
 }
 
 BOOLEAN
 ConCfgReadUserSettings(IN OUT PCONSOLE_STATE_INFO ConsoleInfo,
                        IN BOOLEAN DefaultSettings)
 {
-    BOOLEAN RetVal = FALSE;
+    BOOLEAN Success = FALSE;
     HKEY  hKey;
     DWORD dwNumSubKeys = 0;
     DWORD dwIndex;
@@ -251,99 +252,105 @@ ConCfgReadUserSettings(IN OUT PCONSOLE_STATE_INFO ConsoleInfo,
             if (dwColorIndex < ARRAYSIZE(ConsoleInfo->ColorTable))
             {
                 ConsoleInfo->ColorTable[dwColorIndex] = Value;
-                RetVal = TRUE;
+                Success = TRUE;
             }
         }
-        if (!wcscmp(szValueName, L"FaceName"))
+        if (!wcscmp(szValueName, L"CodePage"))
+        {
+            if (IsValidCodePage(Value))
+                ConsoleInfo->CodePage = Value;
+            Success = TRUE;
+        }
+        else if (!wcscmp(szValueName, L"FaceName"))
         {
             wcsncpy(ConsoleInfo->FaceName, szValue, LF_FACESIZE);
             ConsoleInfo->FaceName[LF_FACESIZE - 1] = UNICODE_NULL;
-            RetVal = TRUE;
+            Success = TRUE;
         }
         else if (!wcscmp(szValueName, L"FontFamily"))
         {
             ConsoleInfo->FontFamily = Value;
-            RetVal = TRUE;
+            Success = TRUE;
         }
         else if (!wcscmp(szValueName, L"FontSize"))
         {
             ConsoleInfo->FontSize.X = LOWORD(Value); // Width
             ConsoleInfo->FontSize.Y = HIWORD(Value); // Height
-            RetVal = TRUE;
+            Success = TRUE;
         }
         else if (!wcscmp(szValueName, L"FontWeight"))
         {
             ConsoleInfo->FontWeight = Value;
-            RetVal = TRUE;
+            Success = TRUE;
         }
         else if (!wcscmp(szValueName, L"HistoryBufferSize"))
         {
             ConsoleInfo->HistoryBufferSize = Value;
-            RetVal = TRUE;
+            Success = TRUE;
         }
         else if (!wcscmp(szValueName, L"NumberOfHistoryBuffers"))
         {
             ConsoleInfo->NumberOfHistoryBuffers = Value;
-            RetVal = TRUE;
+            Success = TRUE;
         }
         else if (!wcscmp(szValueName, L"HistoryNoDup"))
         {
             ConsoleInfo->HistoryNoDup = !!Value;
-            RetVal = TRUE;
+            Success = TRUE;
         }
         else if (!wcscmp(szValueName, L"QuickEdit"))
         {
             ConsoleInfo->QuickEdit = !!Value;
-            RetVal = TRUE;
+            Success = TRUE;
         }
         else if (!wcscmp(szValueName, L"InsertMode"))
         {
             ConsoleInfo->InsertMode = !!Value;
-            RetVal = TRUE;
+            Success = TRUE;
         }
         else if (!wcscmp(szValueName, L"ScreenBufferSize"))
         {
             ConsoleInfo->ScreenBufferSize.X = LOWORD(Value);
             ConsoleInfo->ScreenBufferSize.Y = HIWORD(Value);
-            RetVal = TRUE;
+            Success = TRUE;
         }
         else if (!wcscmp(szValueName, L"FullScreen"))
         {
             ConsoleInfo->FullScreen = Value;
-            RetVal = TRUE;
+            Success = TRUE;
         }
         else if (!wcscmp(szValueName, L"WindowPosition"))
         {
             ConsoleInfo->AutoPosition     = FALSE;
             ConsoleInfo->WindowPosition.x = LOWORD(Value);
             ConsoleInfo->WindowPosition.y = HIWORD(Value);
-            RetVal = TRUE;
+            Success = TRUE;
         }
         else if (!wcscmp(szValueName, L"WindowSize"))
         {
             ConsoleInfo->WindowSize.X = LOWORD(Value);
             ConsoleInfo->WindowSize.Y = HIWORD(Value);
-            RetVal = TRUE;
+            Success = TRUE;
         }
         else if (!wcscmp(szValueName, L"CursorSize"))
         {
             ConsoleInfo->CursorSize = min(max(Value, 0), 100);
-            RetVal = TRUE;
+            Success = TRUE;
         }
         else if (!wcscmp(szValueName, L"ScreenColors"))
         {
             ConsoleInfo->ScreenAttributes = (USHORT)Value;
-            RetVal = TRUE;
+            Success = TRUE;
         }
         else if (!wcscmp(szValueName, L"PopupColors"))
         {
             ConsoleInfo->PopupAttributes = (USHORT)Value;
-            RetVal = TRUE;
+            Success = TRUE;
         }
     }
 
     RegCloseKey(hKey);
-    return RetVal;
+    return Success;
 }
 
 BOOLEAN
@@ -385,6 +392,7 @@ do {                                                                            
         SetConsoleSetting(szValueName, REG_DWORD, sizeof(DWORD), &ConsoleInfo->ColorTable[i], s_Colors[i]);
     }
 
+    SetConsoleSetting(L"CodePage", REG_DWORD, sizeof(DWORD), &ConsoleInfo->CodePage, CP_ACP /* CP_OEMCP */);
     SetConsoleSetting(L"FaceName", REG_SZ, (wcslen(ConsoleInfo->FaceName) + 1) * sizeof(WCHAR), ConsoleInfo->FaceName, UNICODE_NULL); // wcsnlen
     SetConsoleSetting(L"FontFamily", REG_DWORD, sizeof(DWORD), &ConsoleInfo->FontFamily, FF_DONTCARE);
 
@@ -487,7 +495,7 @@ ConCfgInitDefaultSettings(IN OUT PCONSOLE_STATE_INFO ConsoleInfo)
 
     RtlCopyMemory(ConsoleInfo->ColorTable, s_Colors, sizeof(s_Colors));
 
-    ConsoleInfo->CodePage = 0;
+    ConsoleInfo->CodePage = GetOEMCP();
 }
 
 VOID

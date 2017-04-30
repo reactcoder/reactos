@@ -4240,7 +4240,7 @@ static BOOL FASTCALL MENU_ExitTracking(PWND pWnd, BOOL bPopup, UINT wFlags)
  */
 VOID MENU_TrackMouseMenuBar( PWND pWnd, ULONG ht, POINT pt)
 {
-    PMENU pMenu = (ht == HTSYSMENU) ? get_win_sys_menu( UserHMGetHandle(pWnd) ) : IntGetMenu( UserHMGetHandle(pWnd) );
+    PMENU pMenu = (ht == HTSYSMENU) ? IntGetSystemMenu(pWnd, FALSE) : IntGetMenu( UserHMGetHandle(pWnd) );
     UINT wFlags = TPM_BUTTONDOWN | TPM_LEFTALIGN | TPM_LEFTBUTTON;
 
     TRACE("wnd=%p ht=0x%04x (%ld,%ld)\n", pWnd, ht, pt.x, pt.y);
@@ -5288,6 +5288,54 @@ IntSetMenu(
 /*
  * @implemented
  */
+/* http://www.cyber-ta.org/releases/malware-analysis/public/SOURCES/b47155634ccb2c30630da7e3666d3d07/b47155634ccb2c30630da7e3666d3d07.trace.html#NtUserGetIconSize */
+DWORD
+APIENTRY
+NtUserCalcMenuBar(
+    HWND   hwnd,
+    DWORD  leftBorder,
+    DWORD  rightBorder,
+    DWORD  top,
+    LPRECT prc )
+{
+    HDC hdc;
+    PWND Window;
+    RECT Rect;
+    DWORD ret;
+
+    UserEnterExclusive();
+
+    if(!(Window = UserGetWindowObject(hwnd)))
+    {
+        EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+        UserLeave();
+        return 0;
+    }
+
+    hdc = UserGetDCEx(NULL, NULL, DCX_CACHE);
+    if (!hdc)
+    {
+        UserLeave();
+        return 0;
+    }
+
+    Rect.left = leftBorder;
+    Rect.right = Window->rcWindow.right - Window->rcWindow.left - rightBorder;
+    Rect.top = top;
+    Rect.bottom = 0;
+
+    ret = MENU_DrawMenuBar(hdc, &Rect, Window, TRUE);
+
+    UserReleaseDC( 0, hdc, FALSE );
+
+    UserLeave();
+
+    return ret;
+}
+
+/*
+ * @implemented
+ */
 DWORD APIENTRY
 NtUserCheckMenuItem(
    HMENU hMenu,
@@ -6044,6 +6092,41 @@ CLEANUP:
    END_CLEANUP;
 }
 
+
+DWORD
+APIENTRY
+NtUserPaintMenuBar(
+    HWND hWnd,
+    HDC hDC,
+    ULONG leftBorder,
+    ULONG rightBorder,
+    ULONG top,
+    BOOL bActive)
+{
+   PWND Window;
+   RECT Rect;
+   DWORD ret;
+
+   UserEnterExclusive();
+
+   if(!(Window = UserGetWindowObject(hWnd)))
+   {
+      EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+      UserLeave();
+      return 0;
+   }
+
+   Rect.left = leftBorder;
+   Rect.right = Window->rcWindow.right - Window->rcWindow.left - rightBorder;
+   Rect.top = top;
+   Rect.bottom = 0;
+
+   ret = MENU_DrawMenuBar(hDC, &Rect, Window, FALSE);
+
+   UserLeave();
+
+   return ret;
+}
 
 /*
  * @implemented

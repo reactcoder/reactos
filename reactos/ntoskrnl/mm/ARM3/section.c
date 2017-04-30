@@ -1956,7 +1956,7 @@ MiFlushTbAndCapture(IN PMMVAD FoundVad,
                     IN PMMPTE PointerPte,
                     IN ULONG ProtectionMask,
                     IN PMMPFN Pfn1,
-                    IN BOOLEAN CaptureDirtyBit)
+                    IN BOOLEAN UpdateDirty)
 {
     MMPTE TempPte, PreviousPte;
     KIRQL OldIrql;
@@ -2032,7 +2032,13 @@ MiFlushTbAndCapture(IN PMMVAD FoundVad,
     //
     // Windows updates the relevant PFN1 information, we currently don't.
     //
-    if (CaptureDirtyBit) DPRINT1("Warning, not handling dirty bit\n");
+    if (UpdateDirty && PreviousPte.u.Hard.Dirty)
+    {
+        if (!Pfn1->u3.e1.Modified)
+        {
+            DPRINT1("FIXME: Mark PFN as dirty\n");
+        }
+    }
 
     //
     // Not supported in ARM3
@@ -3661,23 +3667,6 @@ NtMapViewOfSection(IN HANDLE SectionHandle,
         }
     }
 
-    if (!(AllocationType & MEM_DOS_LIM))
-    {
-        /* Check for non-allocation-granularity-aligned BaseAddress */
-        if (SafeBaseAddress != ALIGN_DOWN_POINTER_BY(SafeBaseAddress, MM_VIRTMEM_GRANULARITY))
-        {
-           DPRINT("BaseAddress is not at 64-kilobyte address boundary.");
-           return STATUS_MAPPED_ALIGNMENT;
-        }
-
-        /* Do the same for the section offset */
-        if (SafeSectionOffset.LowPart != ALIGN_DOWN_BY(SafeSectionOffset.LowPart, MM_VIRTMEM_GRANULARITY))
-        {
-           DPRINT("SectionOffset is not at 64-kilobyte address boundary.");
-           return STATUS_MAPPED_ALIGNMENT;
-        }
-    }
-
     /* Reference the process */
     Status = ObReferenceObjectByHandle(ProcessHandle,
                                        PROCESS_VM_OPERATION,
@@ -3700,6 +3689,27 @@ NtMapViewOfSection(IN HANDLE SectionHandle,
         return Status;
     }
 
+    if (!(AllocationType & MEM_DOS_LIM))
+    {
+        /* Check for non-allocation-granularity-aligned BaseAddress */
+        if (SafeBaseAddress != ALIGN_DOWN_POINTER_BY(SafeBaseAddress, MM_VIRTMEM_GRANULARITY))
+        {
+           DPRINT("BaseAddress is not at 64-kilobyte address boundary.");
+           ObDereferenceObject(Section);
+           ObDereferenceObject(Process);
+           return STATUS_MAPPED_ALIGNMENT;
+        }
+
+        /* Do the same for the section offset */
+        if (SafeSectionOffset.LowPart != ALIGN_DOWN_BY(SafeSectionOffset.LowPart, MM_VIRTMEM_GRANULARITY))
+        {
+           DPRINT("SectionOffset is not at 64-kilobyte address boundary.");
+           ObDereferenceObject(Section);
+           ObDereferenceObject(Process);
+           return STATUS_MAPPED_ALIGNMENT;
+        }
+    }
+
     /* Now do the actual mapping */
     Status = MmMapViewOfSection(Section,
                                 Process,
@@ -3716,7 +3726,8 @@ NtMapViewOfSection(IN HANDLE SectionHandle,
     if (NT_SUCCESS(Status))
     {
         /* Check if this is an image for the current process */
-        if ((Section->AllocationAttributes & SEC_IMAGE) &&
+        if (MiIsRosSectionObject(Section) &&
+            (Section->AllocationAttributes & SEC_IMAGE) &&
             (Process == PsGetCurrentProcess()) &&
             (Status != STATUS_IMAGE_NOT_AT_BASE))
         {

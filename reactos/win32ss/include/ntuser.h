@@ -1212,11 +1212,11 @@ NtUserBuildHimcList(
 DWORD
 NTAPI
 NtUserCalcMenuBar(
-    DWORD dwUnknown1,
-    DWORD dwUnknown2,
-    DWORD dwUnknown3,
-    DWORD dwUnknown4,
-    DWORD dwUnknown5);
+    HWND   hwnd,
+    DWORD  x,
+    DWORD  width,
+    DWORD  y,
+    LPRECT prc);
 
 DWORD
 NTAPI
@@ -2713,12 +2713,12 @@ NtUserPaintDesktop(
 DWORD
 NTAPI
 NtUserPaintMenuBar(
-    DWORD dwUnknown1,
-    DWORD dwUnknown2,
-    DWORD dwUnknown3,
-    DWORD dwUnknown4,
-    DWORD dwUnknown5,
-    DWORD dwUnknown6);
+    HWND hWnd,
+    HDC hDC,
+    ULONG left,    // x,
+    ULONG right,   // width, // Scale the edge thickness, offset?
+    ULONG top,     // y, 
+    BOOL bActive); // DWORD Flags); DC_ACTIVE or WS_ACTIVECAPTION, by checking WNDS_ACTIVEFRAME and foreground.
 
 BOOL
 APIENTRY

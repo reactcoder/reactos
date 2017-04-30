@@ -5,6 +5,7 @@
  * PURPOSE:         Font dialog
  * PROGRAMMERS:     Johannes Anderwald (johannes.anderwald@reactos.org)
  *                  Hermes Belusca-Maito (hermes.belusca@sfr.fr)
+ *                  Katayama Hirofumi MZ (katayama.hirofumi.mz@gmail.com)
  */
 
 #include "console.h"
@@ -93,6 +94,54 @@ static SHORT TrueTypePoints[] =
     5, 6, 7, 8, 10, 12, 14, 16, 18, 20, 24, 28, 36, 72
 };
 
+#define CP_SHIFTJIS 932 // Japanese Shift-JIS
+#define CP_HANGUL   949 // Korean Hangul
+#define CP_GB2312   936 // Chinese Simplified (GB2312)
+#define CP_BIG5     950 // Chinese Traditional (Big5)
+
+/* IsFarEastCP(CodePage) */
+#define IsCJKCodePage(CodePage) \
+    ((CodePage) == CP_SHIFTJIS || (CodePage) == CP_HANGUL || \
+     (CodePage) == CP_BIG5     || (CodePage) == CP_GB2312)
+
+/* Retrieves the character set associated with a given code page */
+BYTE CodePageToCharSet(UINT CodePage)
+{
+    CHARSETINFO CharInfo;
+    if (TranslateCharsetInfo((LPDWORD)CodePage, &CharInfo, TCI_SRCCODEPAGE))
+        return CharInfo.ciCharset;
+    else
+        return DEFAULT_CHARSET;
+}
+
+
+static VOID
+AddFontToList(
+    IN HWND hWndList,
+    IN LPCWSTR pszFontName,
+    IN DWORD FontType)
+{
+    INT idx;
+
+    /* Make sure the font doesn't already exist in the list */
+    if (SendMessageW(hWndList, LB_FINDSTRINGEXACT, 0, (LPARAM)pszFontName) != LB_ERR)
+        return;
+
+    /* Add the font */
+    idx = (INT)SendMessageW(hWndList, LB_ADDSTRING, 0, (LPARAM)pszFontName);
+    if (idx == LB_ERR)
+    {
+        DPRINT1("Failed to add font '%S'\n", pszFontName);
+        return;
+    }
+
+    DPRINT1("Add font '%S'\n", pszFontName);
+
+    /* Store this information in the list-item's userdata area */
+    // SendMessageW(hWndList, LB_SETITEMDATA, idx, MAKEWPARAM(fFixed, fTrueType));
+    SendMessageW(hWndList, LB_SETITEMDATA, idx, (WPARAM)FontType);
+}
+
 static BOOL CALLBACK
 EnumFontNamesProc(PLOGFONTW lplf,
                   PNEWTEXTMETRICW lpntm,
@@ -129,12 +178,11 @@ EnumFontNamesProc(PLOGFONTW lplf,
      */
 
      /*
-      * In ReactOS, we relax some criteria:
+      * In ReactOS we relax some of the criteria:
       * - We allow fixed-pitch FF_MODERN (Monospace) TrueType fonts
-      *   that can be italic and have negative A or C space.
+      *   that can be italic or have negative A or C space.
       * - If it is not a TrueType font, it can be from another character set
       *   than OEM_CHARSET.
-      * - We do not support Asian criteria at the moment.
       * - We do not look into the magic registry key mentioned above.
       */
 
@@ -147,7 +195,9 @@ EnumFontNamesProc(PLOGFONTW lplf,
         )
     {
         DPRINT1("Font '%S' rejected because it%s (lfPitchAndFamily = %d).\n",
-                pszName, !(lplf->lfPitchAndFamily & FIXED_PITCH) ? "'s not FIXED_PITCH" : (!(lpntm->ntmFlags & NTM_NONNEGATIVE_AC) ? " has negative A or C space" : " is broken"),
+                pszName, !(lplf->lfPitchAndFamily & FIXED_PITCH) ? "'s not FIXED_PITCH"
+                                                                 : (!(lpntm->ntmFlags & NTM_NONNEGATIVE_AC) ? " has negative A or C space"
+                                                                                                            : " is broken"),
                 lplf->lfPitchAndFamily);
         return TRUE;
     }
@@ -160,23 +210,42 @@ EnumFontNamesProc(PLOGFONTW lplf,
         return TRUE;
     }
 
-    /* Reject non-TrueType fonts that are not OEM */
-#if 0
-    if ((FontType != TRUETYPE_FONTTYPE) && (lplf->lfCharSet != OEM_CHARSET))
+    /* Is the current code page Chinese, Japanese or Korean? */
+    if (IsCJKCodePage(ConInfo->CodePage))
     {
-        DPRINT1("Non-TrueType font '%S' rejected because it's not OEM_CHARSET %d\n",
-                pszName, lplf->lfCharSet);
-        return TRUE;
+        /* It's Asian */
+        if (FontType == TRUETYPE_FONTTYPE)
+        {
+            if (lplf->lfCharSet != CodePageToCharSet(ConInfo->CodePage))
+            {
+                DPRINT1("TrueType font '%S' rejected because it's not user Asian charset (lfCharSet = %d)\n",
+                        pszName, lplf->lfCharSet);
+                return TRUE;
+            }
+        }
+        else
+        {
+            /* Reject non-TrueType fonts that are not Terminal */
+            if (wcscmp(pszName, L"Terminal") != 0)
+            {
+                DPRINT1("Non-TrueType font '%S' rejected because it's not Terminal\n", pszName);
+                return TRUE;
+            }
+        }
     }
-#else // Improved criterium
-    if ((FontType != TRUETYPE_FONTTYPE) &&
-        ((lplf->lfCharSet != ANSI_CHARSET) && (lplf->lfCharSet != DEFAULT_CHARSET) && (lplf->lfCharSet != OEM_CHARSET)))
+    else
     {
-        DPRINT1("Non-TrueType font '%S' rejected because it's not ANSI_CHARSET or DEFAULT_CHARSET or OEM_CHARSET (lfCharSet = %d)\n",
-                pszName, lplf->lfCharSet);
-        return TRUE;
+        /* Not CJK */
+        if ((FontType != TRUETYPE_FONTTYPE) &&
+            (lplf->lfCharSet != ANSI_CHARSET) &&
+            (lplf->lfCharSet != DEFAULT_CHARSET) &&
+            (lplf->lfCharSet != OEM_CHARSET))
+        {
+            DPRINT1("Non-TrueType font '%S' rejected because it's not ANSI_CHARSET or DEFAULT_CHARSET or OEM_CHARSET (lfCharSet = %d)\n",
+                    pszName, lplf->lfCharSet);
+            return TRUE;
+        }
     }
-#endif
 
     /* Reject fonts that are vertical (tategaki) */
     if (pszName[0] == L'@')
@@ -185,29 +254,8 @@ EnumFontNamesProc(PLOGFONTW lplf,
         return TRUE;
     }
 
-#if 0 // For Asian installations only
-    /* Reject non-TrueType fonts that are not Terminal */
-    if ((FontType != TRUETYPE_FONTTYPE) && (wcscmp(pszName, L"Terminal") != 0))
-    {
-        DPRINT1("Non-TrueType font '%S' rejected because it's not Terminal\n", pszName);
-        return TRUE;
-    }
-
-    // TODO: Asian TrueType font must also be an Asian character set.
-#endif
-
-    /* Make sure the font doesn't already exist in the list */
-    if (SendMessageW(hwndCombo, LB_FINDSTRINGEXACT, 0, (LPARAM)pszName) == LB_ERR)
-    {
-        /* Add the font */
-        INT idx = (INT)SendMessageW(hwndCombo, LB_ADDSTRING, 0, (LPARAM)pszName);
-
-        DPRINT1("Add font '%S' (lfPitchAndFamily = %d)\n", pszName, lplf->lfPitchAndFamily);
-
-        /* Store this information in the list-item's userdata area */
-        // SendMessageW(hwndCombo, LB_SETITEMDATA, idx, MAKEWPARAM(fFixed, fTrueType));
-        SendMessageW(hwndCombo, LB_SETITEMDATA, idx, (WPARAM)FontType);
-    }
+    /* Add the font to the list */
+    AddFontToList(hwndCombo, pszName, /* MAKEWPARAM(fFixed, fTrueType) */ FontType);
 
     return TRUE;
 }
@@ -282,18 +330,16 @@ static VOID
 FontTypeChange(HWND hwndDlg,
                PCONSOLE_STATE_INFO pConInfo)
 {
+    HWND hListBox = GetDlgItem(hwndDlg, IDC_LBOX_FONTTYPE);
     INT Length, nSel;
     LPWSTR FaceName;
-
     HDC hDC;
     LOGFONTW lf;
 
-    nSel = (INT)SendDlgItemMessageW(hwndDlg, IDC_LBOX_FONTTYPE,
-                                    LB_GETCURSEL, 0, 0);
+    nSel = (INT)SendMessageW(hListBox, LB_GETCURSEL, 0, 0);
     if (nSel == LB_ERR) return;
 
-    Length = (INT)SendDlgItemMessageW(hwndDlg, IDC_LBOX_FONTTYPE,
-                                      LB_GETTEXTLEN, nSel, 0);
+    Length = (INT)SendMessageW(hListBox, LB_GETTEXTLEN, nSel, 0);
     if (Length == LB_ERR) return;
 
     FaceName = HeapAlloc(GetProcessHeap(),
@@ -301,21 +347,17 @@ FontTypeChange(HWND hwndDlg,
                          (Length + 1) * sizeof(WCHAR));
     if (FaceName == NULL) return;
 
-    Length = (INT)SendDlgItemMessageW(hwndDlg, IDC_LBOX_FONTTYPE,
-                                      LB_GETTEXT, nSel, (LPARAM)FaceName);
-    FaceName[Length] = '\0';
+    Length = (INT)SendMessageW(hListBox, LB_GETTEXT, nSel, (LPARAM)FaceName);
+    FaceName[Length] = L'\0';
 
-    Length = min(Length/*wcslen(FaceName) + 1*/, LF_FACESIZE - 1); // wcsnlen
-    wcsncpy(pConInfo->FaceName, FaceName, LF_FACESIZE);
-    pConInfo->FaceName[Length] = L'\0';
+    StringCchCopyW(pConInfo->FaceName, ARRAYSIZE(pConInfo->FaceName), FaceName);
     DPRINT1("pConInfo->FaceName = '%S'\n", pConInfo->FaceName);
 
     /* Enumerate the available sizes for the selected font */
     ZeroMemory(&lf, sizeof(lf));
-    lf.lfCharSet  = DEFAULT_CHARSET; // OEM_CHARSET;
+    lf.lfCharSet = DEFAULT_CHARSET; // CodePageToCharSet(pConInfo->CodePage);
     // lf.lfPitchAndFamily = FIXED_PITCH | FF_DONTCARE;
-    wcsncpy(lf.lfFaceName, FaceName, LF_FACESIZE);
-    lf.lfFaceName[Length] = L'\0';
+    StringCchCopyW(lf.lfFaceName, ARRAYSIZE(lf.lfFaceName), FaceName);
 
     hDC = GetDC(NULL);
     EnumFontFamiliesExW(hDC, &lf, (FONTENUMPROCW)EnumFontSizesProc,
@@ -335,12 +377,12 @@ static VOID
 FontSizeChange(HWND hwndDlg,
                PCONSOLE_STATE_INFO pConInfo)
 {
+    HWND hListBox = GetDlgItem(hwndDlg, IDC_LBOX_FONTSIZE);
     INT nSel;
     ULONG FontSize;
     WCHAR FontSizeStr[20];
 
-    nSel = (INT)SendDlgItemMessageW(hwndDlg, IDC_LBOX_FONTSIZE,
-                                    LB_GETCURSEL, 0, 0);
+    nSel = (INT)SendMessageW(hListBox, LB_GETCURSEL, 0, 0);
     if (nSel == LB_ERR) return;
 
     /*
@@ -348,8 +390,7 @@ FontSizeChange(HWND hwndDlg,
      * Width  = FontSize.X = LOWORD(FontSize);
      * Height = FontSize.Y = HIWORD(FontSize);
      */
-    FontSize = (ULONG)SendDlgItemMessageW(hwndDlg, IDC_LBOX_FONTSIZE,
-                                          LB_GETITEMDATA, nSel, 0);
+    FontSize = (ULONG)SendMessageW(hListBox, LB_GETITEMDATA, nSel, 0);
     if (FontSize == LB_ERR) return;
 
     pConInfo->FontSize.X = LOWORD(FontSize);
@@ -360,9 +401,9 @@ FontSizeChange(HWND hwndDlg,
     InvalidateRect(GetDlgItem(hwndDlg, IDC_STATIC_SELECT_FONT_PREVIEW), NULL, TRUE);
 
     swprintf(FontSizeStr, L"%2d", pConInfo->FontSize.X);
-    SetWindowText(GetDlgItem(hwndDlg, IDC_FONT_SIZE_X), FontSizeStr);
+    SetDlgItemText(hwndDlg, IDC_FONT_SIZE_X, FontSizeStr);
     swprintf(FontSizeStr, L"%2d", pConInfo->FontSize.Y);
-    SetWindowText(GetDlgItem(hwndDlg, IDC_FONT_SIZE_Y), FontSizeStr);
+    SetDlgItemText(hwndDlg, IDC_FONT_SIZE_Y, FontSizeStr);
 }
 
 
@@ -379,24 +420,34 @@ FontProc(HWND hwndDlg,
     {
         case WM_INITDIALOG:
         {
+            HWND hListBox = GetDlgItem(hwndDlg, IDC_LBOX_FONTTYPE);
             HDC  hDC;
             LOGFONTW lf;
             INT idx;
 
             ZeroMemory(&lf, sizeof(lf));
-            lf.lfCharSet  = DEFAULT_CHARSET; // OEM_CHARSET;
+            lf.lfCharSet = DEFAULT_CHARSET; // CodePageToCharSet(ConInfo->CodePage);
             // lf.lfPitchAndFamily = FIXED_PITCH | FF_DONTCARE;
 
             hDC = GetDC(NULL);
-            EnumFontFamiliesExW(hDC, &lf, (FONTENUMPROCW)EnumFontNamesProc,
-                                (LPARAM)GetDlgItem(hwndDlg, IDC_LBOX_FONTTYPE), 0);
+            EnumFontFamiliesExW(hDC, &lf, (FONTENUMPROCW)EnumFontNamesProc, (LPARAM)hListBox, 0);
             ReleaseDC(NULL, hDC);
 
+            idx = (INT)SendMessageW(hListBox, LB_GETCOUNT, 0, 0);
+            if ((idx == 0) || (idx == LB_ERR))
+            {
+                DPRINT1("The ideal console fonts are not found; manually add default ones.\n");
+
+                /* This world is not ideal. We have to do it realistically. */
+                AddFontToList(hListBox, L"Lucida Console", TRUETYPE_FONTTYPE);
+                if (CodePageToCharSet(ConInfo->CodePage) != DEFAULT_CHARSET)
+                    AddFontToList(hListBox, L"Droid Sans Fallback", TRUETYPE_FONTTYPE);
+            }
+
             DPRINT1("ConInfo->FaceName = '%S'\n", ConInfo->FaceName);
-            idx = (INT)SendDlgItemMessageW(hwndDlg, IDC_LBOX_FONTTYPE,
-                                           LB_FINDSTRINGEXACT, 0, (LPARAM)ConInfo->FaceName);
-            if (idx != LB_ERR) SendDlgItemMessageW(hwndDlg, IDC_LBOX_FONTTYPE,
-                                                   LB_SETCURSEL, (WPARAM)idx, 0);
+            idx = (INT)SendMessageW(hListBox, LB_FINDSTRINGEXACT, 0, (LPARAM)ConInfo->FaceName);
+            if (idx != LB_ERR)
+                SendMessageW(hListBox, LB_SETCURSEL, (WPARAM)idx, 0);
 
             FontTypeChange(hwndDlg, ConInfo);
 

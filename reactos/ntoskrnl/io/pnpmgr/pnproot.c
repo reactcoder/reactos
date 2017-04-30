@@ -525,7 +525,8 @@ EnumerateDevices(
         Status = IopOpenRegistryKeyEx(&SubKeyHandle, KeyHandle, &SubKeyName, KEY_ENUMERATE_SUB_KEYS);
         if (!NT_SUCCESS(Status))
         {
-            DPRINT("IopOpenRegistryKeyEx() failed with status 0x%08lx\n", Status);
+            DPRINT("IopOpenRegistryKeyEx() failed for '%wZ' with status 0x%lx\n",
+                   &SubKeyName, Status);
             break;
         }
 
@@ -585,7 +586,8 @@ EnumerateDevices(
                 Status = IopOpenRegistryKeyEx(&DeviceKeyHandle, SubKeyHandle, &Device->InstanceID, KEY_READ);
                 if (!NT_SUCCESS(Status))
                 {
-                    DPRINT1("IopOpenRegistryKeyEx() failed with status 0x%08lx\n", Status);
+                    DPRINT1("IopOpenRegistryKeyEx() failed for '%wZ' with status 0x%lx\n",
+                            &Device->InstanceID, Status);
                     break;
                 }
 
@@ -1187,6 +1189,10 @@ PnpRootPdoPnpControl(
 
         case IRP_MN_QUERY_ID: /* 0x13 */
             Status = PdoQueryId(DeviceObject, Irp, IrpSp);
+            break;
+
+        case IRP_MN_QUERY_PNP_DEVICE_STATE: /* 0x14 */
+            DPRINT("IRP_MJ_PNP / IRP_MN_QUERY_PNP_DEVICE_STATE\n");
             break;
 
         case IRP_MN_QUERY_BUS_INFORMATION: /* 0x15 */

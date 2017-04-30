@@ -21,7 +21,7 @@
 
 #include <freeldr.h>
 
-#define NDEBUG
+#define YDEBUG
 #include <debug.h>
 
 DBG_DEFAULT_CHANNEL(HWDETECT);
@@ -334,9 +334,9 @@ PcInitializeBootDevices(VOID)
         /* Check if we have seen the boot drive */
         if (FrldrBootDrive == DriveNumber)
             BootDriveReported = TRUE;
-
         DiskCount++;
         DriveNumber++;
+		TRACE("Increment disk count to %d and driver number %d, FrldrBootDrive %d \n", (int)DiskCount, (int)DriveNumber, (int)FrldrBootDrive);
         memset(DiskReadBuffer, 0xcd, DiskReadBufferSize);
     }
     DiskReportError(TRUE);
@@ -350,6 +350,7 @@ PcInitializeBootDevices(VOID)
     if ((FrldrBootDrive >= 0x80 && !BootDriveReported) ||
         DiskIsDriveRemovable(FrldrBootDrive))
     {
+		TRACE("FrldrBootDrive %d BootDriveReported %d,  DiskIsDriveRemovable(FrldrBootDrive) %d \n", (int)FrldrBootDrive, (int)BootDriveReported, (int)DiskIsDriveRemovable(FrldrBootDrive));
         /* TODO: Check if it's really a CDROM drive */
 
         PMASTER_BOOT_RECORD Mbr;
@@ -386,7 +387,6 @@ PcInitializeBootDevices(VOID)
         FsRegisterDevice(BootPath, &DiskVtbl);
         DiskCount++;
     }
-
     PcBiosDiskCount = DiskCount;
     TRACE("BIOS reports %d harddisk%s\n",
           (int)DiskCount, (DiskCount == 1) ? "": "s");

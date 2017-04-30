@@ -862,35 +862,6 @@ NtUserTestForInteractiveUser(
     return 0;
 }
 
-/* http://www.cyber-ta.org/releases/malware-analysis/public/SOURCES/b47155634ccb2c30630da7e3666d3d07/b47155634ccb2c30630da7e3666d3d07.trace.html#NtUserGetIconSize */
-DWORD
-APIENTRY
-NtUserCalcMenuBar(
-    DWORD dwUnknown1,
-    DWORD dwUnknown2,
-    DWORD dwUnknown3,
-    DWORD dwUnknown4,
-    DWORD dwUnknown5)
-{
-    STUB;
-    return 0;
-}
-
-DWORD
-APIENTRY
-NtUserPaintMenuBar(
-    DWORD dwUnknown1,
-    DWORD dwUnknown2,
-    DWORD dwUnknown3,
-    DWORD dwUnknown4,
-    DWORD dwUnknown5,
-    DWORD dwUnknown6)
-{
-    STUB;
-    return 0;
-}
-
-
 DWORD
 APIENTRY
 NtUserRemoteConnect(

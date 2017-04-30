@@ -708,7 +708,22 @@ typedef struct _COMMAND_DESCRIPTOR
     LIST_ENTRY       DescriptorListEntry;
 }COMMAND_DESCRIPTOR, *PCOMMAND_DESCRIPTOR;
 
+//
+// HCD endpoint state
+//
+typedef struct _ENDPOINT
+{
+    PHYSICAL_ADDRESS PhysicalRingbufferAddress; 
+    PVOID            VirtualRingbufferAddress;  
+    PTRB             EnqueuePointer, DequeuePointer;
+    ULONG            CycleState;
+    LIST_ENTRY       DescriptorListHead;
+    ULONG            EndpointState;
+}ENDPOINT, *PENDPOINT;
 
+#define XHCI_SEARCH_DEVICE_BY_SLOT_ID   1
+#define XHCI_SEARCH_DEVICE_BY_PORT_ID   2
+#define XHCI_SEARCH_DEVICE_BY_ADDRESS   3
 //
 // device info
 //
@@ -724,7 +739,7 @@ typedef struct _PDEVICE_INFORMATION
     PHYSICAL_ADDRESS      PhysicalDeviceContextAddress;
     PDEVICE_CONTEXT       DeviceContextAddress;
 
-    //ENDPOINT              Endpoints[31];
+    ENDPOINT              Endpoints[31];
 
     ULONG                 PortId;
     LIST_ENTRY            DeviceListEntry;

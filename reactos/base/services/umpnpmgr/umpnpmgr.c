@@ -21,7 +21,7 @@
  * PROJECT:          ReactOS kernel
  * FILE:             base/services/umpnpmgr/umpnpmgr.c
  * PURPOSE:          User-mode Plug and Play manager
- * PROGRAMMER:       Eric Kohl
+ * PROGRAMMER:       Eric Kohl (eric.kohl@reactos.org)
  *                   Hervé Poussineau (hpoussin@reactos.org)
  *                   Colin Finck (colin@reactos.org)
  */
@@ -37,6 +37,8 @@
 #include <winbase.h>
 #include <winreg.h>
 #include <winsvc.h>
+#include <winuser.h>
+#include <dbt.h>
 #include <stdio.h>
 #include <cmfuncs.h>
 #include <rtlfuncs.h>
@@ -3002,6 +3004,8 @@ PNP_GetVersionInternal(
     handle_t hBinding,
     WORD *pwVersion)
 {
+    UNREFERENCED_PARAMETER(hBinding);
+
     *pwVersion = 0x501;
     return CR_SUCCESS;
 }
@@ -3030,8 +3034,21 @@ PNP_GetServerSideDeviceInstallFlags(
     DWORD *pulSSDIFlags,
     DWORD ulFlags)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(hBinding);
+
+    DPRINT1("PNP_GetServerSideDeviceInstallFlags(%p %p %lu)\n",
+            hBinding, pulSSDIFlags, ulFlags);
+
+    if (pulSSDIFlags == NULL)
+        return CR_INVALID_POINTER;
+
+    if (ulFlags != 0)
+        return CR_INVALID_FLAG;
+
+    /* FIXME */
+    *pulSSDIFlags = 0;
+
+    return CR_SUCCESS;
 }
 
 
@@ -3211,6 +3228,22 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
             DPRINT("No need to install: %S\n", DeviceInstance);
             RegCloseKey(DeviceKey);
             return TRUE;
+        }
+
+        BytesWritten = sizeof(DWORD);
+        if (RegQueryValueExW(DeviceKey,
+                             L"ConfigFlags",
+                             NULL,
+                             NULL,
+                             (PBYTE)&Value,
+                             &BytesWritten) == ERROR_SUCCESS)
+        {
+            if (Value & CONFIGFLAG_FAILEDINSTALL)
+            {
+                DPRINT("No need to install: %S\n", DeviceInstance);
+                RegCloseKey(DeviceKey);
+                return TRUE;
+            }
         }
 
         RegCloseKey(DeviceKey);
@@ -3563,8 +3596,17 @@ PnpEventThread(LPVOID lpParameter)
         }
         else if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_ARRIVAL, &RpcStatus))
         {
+//            DWORD dwRecipient;
+
             DPRINT("Device arrival: %S\n", PnpEvent->TargetDevice.DeviceIds);
-            /* FIXME: ? */
+
+//            dwRecipient = BSM_ALLDESKTOPS | BSM_APPLICATIONS;
+//            BroadcastSystemMessageW(BSF_POSTMESSAGE,
+//                                    &dwRecipient,
+//                                    WM_DEVICECHANGE,
+//                                    DBT_DEVNODES_CHANGED,
+//                                    0);
+            SendMessageW(HWND_BROADCAST, WM_DEVICECHANGE, DBT_DEVNODES_CHANGED, 0);
         }
         else if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_EJECT_VETOED, &RpcStatus))
         {
@@ -3576,11 +3618,31 @@ PnpEventThread(LPVOID lpParameter)
         }
         else if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_SAFE_REMOVAL, &RpcStatus))
         {
+//            DWORD dwRecipient;
+
             DPRINT1("Safe removal: %S\n", PnpEvent->TargetDevice.DeviceIds);
+
+//            dwRecipient = BSM_ALLDESKTOPS | BSM_APPLICATIONS;
+//            BroadcastSystemMessageW(BSF_POSTMESSAGE,
+//                                    &dwRecipient,
+//                                    WM_DEVICECHANGE,
+//                                    DBT_DEVNODES_CHANGED,
+//                                    0);
+            SendMessageW(HWND_BROADCAST, WM_DEVICECHANGE, DBT_DEVNODES_CHANGED, 0);
         }
         else if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_SURPRISE_REMOVAL, &RpcStatus))
         {
+//            DWORD dwRecipient;
+
             DPRINT1("Surprise removal: %S\n", PnpEvent->TargetDevice.DeviceIds);
+
+//            dwRecipient = BSM_ALLDESKTOPS | BSM_APPLICATIONS;
+//            BroadcastSystemMessageW(BSF_POSTMESSAGE,
+//                                    &dwRecipient,
+//                                    WM_DEVICECHANGE,
+//                                    DBT_DEVNODES_CHANGED,
+//                                    0);
+            SendMessageW(HWND_BROADCAST, WM_DEVICECHANGE, DBT_DEVNODES_CHANGED, 0);
         }
         else if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_REMOVAL_VETOED, &RpcStatus))
         {

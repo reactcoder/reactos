@@ -20,6 +20,10 @@
         IN ULONG DeviceAddress,                               \
         OUT PDEVICE_INFORMATION *DeviceInformation) PURE;     \
                                                               \
+    STDMETHOD_(NTSTATUS, GetDeviceInformationBySlotId)(THIS_  \
+        IN ULONG SlotId,                                      \
+        OUT PDEVICE_INFORMATION *DeviceInformation) PURE;     \
+                                                              \
     STDMETHOD_(VOID, RingDoorbellRegister)(THIS_              \
         IN ULONG SlotId,                                      \
         IN ULONG Endpoint,                                    \
@@ -29,14 +33,22 @@
     STDMETHODIMP_(VOID) SetRuntimeRegister(                   \
         IN ULONG Offset,                                      \
         IN ULONG Value);                                      \
+                                                              \
     STDMETHODIMP_(ULONG) GetRuntimeRegister(                  \
         IN ULONG Offset);                                     \
+                                                              \
     STDMETHODIMP_(VOID) SetOperationalRegister(               \
         IN ULONG Offset,                                      \
         IN ULONG Value);                                      \
+                                                              \
     STDMETHODIMP_(NTSTATUS) GetDeviceInformationByAddress(    \
         IN ULONG DeviceAddress,                               \
         OUT PDEVICE_INFORMATION *DeviceInformation);          \
+                                                              \
+    STDMETHODIMP_(NTSTATUS) GetDeviceInformationBySlotId(     \
+        IN ULONG SlotId,                                      \
+        OUT PDEVICE_INFORMATION *DeviceInformation);          \
+                                                              \
     STDMETHODIMP_(VOID) RingDoorbellRegister(                 \
         IN ULONG SlotId,                                      \
         IN ULONG Endpoint,                                    \

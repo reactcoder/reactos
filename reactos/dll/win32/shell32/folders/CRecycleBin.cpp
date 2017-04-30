@@ -488,7 +488,7 @@ UnpackDetailsFromPidl(LPCITEMIDLIST pidl)
 
 HRESULT WINAPI CRecycleBin::EnumObjects(HWND hwndOwner, DWORD dwFlags, LPENUMIDLIST *ppEnumIDList)
 {
-    return ShellObjectCreatorInit<CRecycleBinEnum>(dwFlags, IID_IEnumIDList, ppEnumIDList);
+    return ShellObjectCreatorInit<CRecycleBinEnum>(dwFlags, IID_PPV_ARG(IEnumIDList, ppEnumIDList));
 }
 
 HRESULT WINAPI CRecycleBin::BindToObject(PCUIDLIST_RELATIVE pidl, LPBC pbc, REFIID riid, void **ppv)
@@ -1162,7 +1162,7 @@ HRESULT WINAPI DoDeleteDataObject(IDataObject *pda, DWORD fMask)
     *pwszFilename = L'\0';
 
     /* Build paths list */
-    LPWSTR pwszPaths = BuildPathsList(wszPath, lpcida->cidl, (LPCITEMIDLIST*) apidl);
+    LPWSTR pwszPaths = BuildPathsList(wszPath, lpcida->cidl, (LPCITEMIDLIST*) apidl, FALSE);
     if (!pwszPaths)
     {
         SHFree(pidl);

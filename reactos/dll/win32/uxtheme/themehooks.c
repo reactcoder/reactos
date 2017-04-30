@@ -11,6 +11,7 @@
 USERAPIHOOK user32ApiHook;
 BYTE gabDWPmessages[UAHOWP_MAX_SIZE];
 BYTE gabMSGPmessages[UAHOWP_MAX_SIZE];
+BYTE gabDLGPmessages[UAHOWP_MAX_SIZE];
 BOOL gbThemeHooksActive = FALSE;
 
 PWND_CONTEXT ThemeGetWndContext(HWND hWnd)
@@ -56,7 +57,21 @@ void ThemeDestroyWndContext(HWND hWnd)
     {
         user32ApiHook.SetWindowRgn(hWnd, 0, TRUE);
     }
-    
+
+    if (pContext->hTabBackgroundBrush != NULL)
+    {
+        CloseThemeData(GetWindowTheme(hWnd));
+
+        DeleteObject(pContext->hTabBackgroundBrush);
+        pContext->hTabBackgroundBrush = NULL;
+    }
+
+    if (pContext->hTabBackgroundBmp != NULL)
+    {
+        DeleteObject(pContext->hTabBackgroundBmp);
+        pContext->hTabBackgroundBmp = NULL;
+    }
+
     HeapFree(GetProcessHeap(), 0, pContext);
 
     SetPropW( hWnd, (LPCWSTR)MAKEINTATOM(atWndContext), NULL);
@@ -97,7 +112,9 @@ void SetThemeRegion(HWND hWnd)
     GetWindowInfo(hWnd, &wi);
 
     /* Get the caption part id */
-    if (wi.dwExStyle & WS_EX_TOOLWINDOW)
+    if (wi.dwStyle & WS_MINIMIZE)
+        iPart = WP_MINCAPTION;
+    else if (wi.dwExStyle & WS_EX_TOOLWINDOW)
         iPart = WP_SMALLCAPTION;
     else if (wi.dwStyle & WS_MAXIMIZE)
         iPart = WP_MAXCAPTION;
@@ -223,8 +240,27 @@ ThemePreWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_PTR 
     switch(Msg)
     {
         case WM_THEMECHANGED:
+        {
+            PWND_CONTEXT pcontext = ThemeGetWndContext(hWnd);
+
             if (GetAncestor(hWnd, GA_PARENT) == GetDesktopWindow())
                 UXTHEME_LoadTheme(TRUE);
+
+            if (pcontext == NULL)
+                return 0;
+
+            if (pcontext->hTabBackgroundBrush != NULL)
+            {
+                DeleteObject(pcontext->hTabBackgroundBrush);
+                pcontext->hTabBackgroundBrush = NULL;
+            }
+
+            if (pcontext->hTabBackgroundBmp != NULL)
+            {
+                DeleteObject(pcontext->hTabBackgroundBmp);
+                pcontext->hTabBackgroundBmp = NULL;
+            }
+        }
         case WM_NCCREATE:
         {
             PWND_CONTEXT pcontext = ThemeGetWndContext(hWnd);
@@ -247,10 +283,133 @@ ThemePostWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_PTR
         {
             return OnPostWinPosChanged(hWnd, (WINDOWPOS*)lParam);
         }
-        case WM_DESTROY:
+        case WM_NCDESTROY:
         {
             ThemeDestroyWndContext(hWnd);
             return 0;
+        }
+    }
+
+    return 0;
+}
+
+HRESULT GetDiaogTextureBrush(HTHEME theme, HWND hwnd, HDC hdc, HBRUSH* result, BOOL changeOrigin)
+{
+    PWND_CONTEXT pcontext;
+
+    pcontext = ThemeGetWndContext(hwnd);
+    if (pcontext == NULL)
+        return E_FAIL;
+
+    if (pcontext->hTabBackgroundBrush == NULL)
+    {
+        HBITMAP hbmp;
+        RECT dummy, bmpRect;
+        BOOL hasImageAlpha;
+
+        UXTHEME_LoadImage(theme, 0, TABP_BODY, 0, &dummy, FALSE, &hbmp, &bmpRect, &hasImageAlpha);
+        if (changeOrigin)
+        {
+            /* Unfortunately SetBrushOrgEx doesn't work at all */
+            RECT rcWindow, rcParent;
+            POINT pt;
+            HDC hdcPattern, hdcHackPattern;
+            HBITMAP hbmpOld1, hbmpold2, hbmpHack;
+
+            GetWindowRect(hwnd, &rcWindow);
+            GetWindowRect(GetParent(hwnd), &rcParent);
+            pt.x = rcWindow.left - rcParent.left;
+            pt.y = rcWindow.top - rcParent.top;
+
+            hdcPattern = CreateCompatibleDC(hdc);
+            hbmpOld1 = (HBITMAP)SelectObject(hdcPattern, hbmp);
+
+            hdcHackPattern = CreateCompatibleDC(hdc);
+            hbmpHack = CreateCompatibleBitmap(hdc, bmpRect.right, bmpRect.bottom);
+            hbmpold2 = (HBITMAP)SelectObject(hdcHackPattern, hbmpHack);
+
+            BitBlt(hdcHackPattern, 0, 0, bmpRect.right, bmpRect.bottom - pt.y, hdcPattern, 0, pt.y, SRCCOPY);
+            BitBlt(hdcHackPattern, 0, bmpRect.bottom - pt.y, bmpRect.right, pt.y, hdcPattern, 0, 0, SRCCOPY);
+
+            hbmpold2 = (HBITMAP)SelectObject(hdcHackPattern, hbmpold2);
+            hbmpOld1 = (HBITMAP)SelectObject(hdcPattern, hbmpOld1);
+
+            DeleteDC(hdcPattern);
+            DeleteDC(hdcHackPattern);
+
+            /* Keep the handle of the bitmap we created so that it can be used later */
+            pcontext->hTabBackgroundBmp = hbmpHack;
+            hbmp = hbmpHack;
+        }
+
+        /* hbmp is cached so there is no need to free it */
+        pcontext->hTabBackgroundBrush = CreatePatternBrush(hbmp);
+    }
+
+    if (!pcontext->hTabBackgroundBrush)
+        return E_FAIL;
+
+    *result = pcontext->hTabBackgroundBrush;
+    return S_OK;
+}
+
+void HackFillStaticBg(HWND hwnd, HDC hdc, HBRUSH* result)
+{
+    RECT rcStatic;
+
+    GetClientRect(hwnd, &rcStatic);
+    FillRect(hdc, &rcStatic, *result);
+
+    SetBkMode (hdc, TRANSPARENT);
+    *result = GetStockObject (NULL_BRUSH);
+}
+
+static LRESULT CALLBACK
+ThemeDlgPreWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_PTR ret,PDWORD unknown)
+{
+    return 0;
+}
+
+static LRESULT CALLBACK
+ThemeDlgPostWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_PTR ret,PDWORD unknown)
+{
+    switch(Msg)
+    {
+        case WM_CTLCOLORDLG:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLORSTATIC:
+        {
+            HWND hwndTarget = (HWND)lParam;
+            HDC hdc = (HDC)wParam;
+            HBRUSH* phbrush = (HBRUSH*)ret;
+            HTHEME hTheme;
+
+            if (!IsAppThemed())
+                break;
+
+            if (!IsThemeDialogTextureEnabled (hWnd))
+                break;
+
+            hTheme = GetWindowTheme(hWnd);
+            if (!hTheme)
+                hTheme = OpenThemeData(hWnd, L"TAB");
+
+            if (!hTheme)
+                break;
+
+            GetDiaogTextureBrush(hTheme, hwndTarget, hdc, phbrush, Msg != WM_CTLCOLORDLG);
+
+#if 1 
+            {
+                WCHAR controlClass[32];
+                GetClassNameW (hwndTarget, controlClass, sizeof(controlClass) / sizeof(controlClass[0]));
+
+                /* This is a hack for the static class. Windows have a v6 static class just for this. */
+                if (lstrcmpiW (controlClass, WC_STATICW) == 0)
+                    HackFillStaticBg(hwndTarget, hdc, phbrush);
+            }
+#endif
+            break;
         }
     }
 
@@ -331,13 +490,13 @@ ThemeInitApiHook(UAPIHK State, PUSERAPIHOOK puah)
     puah->DefWindowProcW = ThemeDefWindowProcW;
     puah->PreWndProc = ThemePreWindowProc;
     puah->PostWndProc = ThemePostWindowProc;
-    puah->PreDefDlgProc = ThemePreWindowProc;
-    puah->PostDefDlgProc = ThemePostWindowProc;
+    puah->PreDefDlgProc = ThemeDlgPreWindowProc;
+    puah->PostDefDlgProc = ThemeDlgPostWindowProc;
     puah->DefWndProcArray.MsgBitArray  = gabDWPmessages;
     puah->DefWndProcArray.Size = UAHOWP_MAX_SIZE;
     puah->WndProcArray.MsgBitArray = gabMSGPmessages;
     puah->WndProcArray.Size = UAHOWP_MAX_SIZE;
-    puah->DlgProcArray.MsgBitArray = gabMSGPmessages;
+    puah->DlgProcArray.MsgBitArray = gabDLGPmessages;
     puah->DlgProcArray.Size = UAHOWP_MAX_SIZE;
 
     puah->SetWindowRgn = ThemeSetWindowRgn;
@@ -377,6 +536,16 @@ ThemeInitApiHook(UAPIHK State, PUSERAPIHOOK puah)
     UAH_HOOK_MESSAGE(puah->WndProcArray, WM_MDISETMENU);
     UAH_HOOK_MESSAGE(puah->WndProcArray, WM_THEMECHANGED);
     UAH_HOOK_MESSAGE(puah->WndProcArray, WM_UAHINIT);
+
+    puah->DlgProcArray.MsgBitArray = gabDLGPmessages;
+    puah->DlgProcArray.Size = UAHOWP_MAX_SIZE;
+
+    UAH_HOOK_MESSAGE(puah->DlgProcArray, WM_INITDIALOG);
+    UAH_HOOK_MESSAGE(puah->DlgProcArray, WM_CTLCOLORMSGBOX);
+    UAH_HOOK_MESSAGE(puah->DlgProcArray, WM_CTLCOLORBTN);
+    UAH_HOOK_MESSAGE(puah->DlgProcArray, WM_CTLCOLORDLG);
+    UAH_HOOK_MESSAGE(puah->DlgProcArray, WM_CTLCOLORSTATIC);
+    UAH_HOOK_MESSAGE(puah->DlgProcArray, WM_PRINTCLIENT);
 
     UXTHEME_LoadTheme(TRUE);
 

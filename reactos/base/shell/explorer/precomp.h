@@ -108,11 +108,14 @@ GetExplorerRegValueSet(IN HKEY hKey,
  *  rshell.c
  */
 
+VOID InitRSHELL(VOID);
 HRESULT WINAPI _CStartMenu_Constructor(REFIID riid, void **ppv);
 HANDLE WINAPI _SHCreateDesktop(IShellDesktopTray *ShellDesk);
 BOOL WINAPI _SHDesktopMessageLoop(HANDLE hDesktop);
 DWORD WINAPI _WinList_Init(void);
 void WINAPI _ShellDDEInit(BOOL bInit);
+HRESULT WINAPI _CBandSiteMenu_CreateInstance(REFIID riid, void **ppv);
+HRESULT WINAPI _CBandSite_CreateInstance(LPUNKNOWN pUnkOuter, REFIID riid, void **ppv);
 
 /*
  * traywnd.c
@@ -176,16 +179,25 @@ TrayMessageLoop(IN OUT ITrayWindow *Tray);
  */
 
 /* Structure to hold non-default options*/
-typedef struct _ADVANCED_SETTINGS
+typedef struct _TASKBAR_SETTINGS
 {
+    BOOL bLock;
+    BOOL bAutoHide;
+    BOOL bAlwaysOnTop;
+    BOOL bGroupButtons;
+    BOOL bShowQuickLaunch;
+    BOOL bShowClock;
     BOOL bShowSeconds;
-} ADVANCED_SETTINGS, *PADVANCED_SETTINGS;
+    BOOL bHideInactiveIcons;
+} TASKBAR_SETTINGS, *PTASKBAR_SETTINGS;
 
-extern ADVANCED_SETTINGS AdvancedSettings;
-extern const TCHAR szAdvancedSettingsKey [];
+extern TASKBAR_SETTINGS TaskBarSettings;
 
 VOID
-LoadAdvancedSettings(VOID);
+LoadTaskBarSettings(VOID);
+
+VOID
+SaveTaskBarSettings(VOID);
 
 BOOL
 SaveSettingDword(IN LPCWSTR pszKeyName,
